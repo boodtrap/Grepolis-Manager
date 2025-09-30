@@ -1,17 +1,18 @@
 // ==UserScript==
 // @name         Grepolis Manager
-// @namespace    http://tampermonkey.net/
-// @version      0.3
-// @description  Verbeterd en gestructureerd script voor Grepolis
-// @author       Zambia1972
-// @resource     buttonOff https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/button-off.png
-// @resource     buttonOn https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/button-on.png
+// @namespace    https://github.com/zambia1972/Grepolis-Manager
+// @version      1.0
+// @description  Geconsolideerde refactor: centrale CSS, BaseManager UI-helpers, ButtonsBar, TroopManager & Wereldinfo gemigreerd. MapManager/ForumManager hooks voorbereid.
+// @author       Zambia1972, Copyright (c) 2025
+// @copyright    Copyright (c) 2025, Zambia1972
+// @match        https://*.grepolis.com/*
+// @connect      nl.forum.grepolis.com
+// @connect      forum.grepolis.net
+// @icon         https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-GM.png
 // @resource     iconGM https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-GM.png
 // @resource     iconInstellingen https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/instellingen.png
-// @resource     iconAttack https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-attackrange-helper.png
-// @resource     iconFeesten https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-feesten.png
+// @resource     iconWereldinfo https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/wereldinfo.png
 // @resource     iconForum https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-forummanager.png
-// @resource     iconKaart https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-kaart.png
 // @resource     iconTroop https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-troopmanager.png
 // @grant        GM_getValue
 // @grant        GM_getResourceURL
@@ -25,11 +26,337 @@
 // @grant        GM_notification
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
-// @match        https://*.grepolis.com/game/*
+// @connect      api.grepodata.com
 // ==/UserScript==
 
 (function() {
     'use strict';
+
+    const DEBUG = false; // zet true voor extra debug output
+
+    // Hulpfunctie om CORS te omzeilen in userscripts
+    // Vervang bestaande gmFetch functie door deze robuuste versie
+    function gmFetch(url, options = {}) {
+        return new Promise((resolve, reject) => {
+            const cb = (response) => {
+                try {
+                    const status = response.status || response.statusCode || 0;
+                    if (status >= 200 && status < 300) {
+                        resolve({
+                            ok: true,
+                            status,
+                            json: async () => {
+                                try { return JSON.parse(response.responseText || response.response || ''); }
+                                catch (e) { throw new Error('Invalid JSON response: ' + e.message); }
+                            },
+                            text: async () => (response.responseText || response.response || '')
+                        });
+                    } else {
+                        reject(new Error(`HTTP ${status}: ${response.responseText || response.response || ''}`));
+                    }
+                } catch (err) { reject(err); }
+            };
+
+            // Kies GM_xmlhttpRequest (legacy) of GM.xmlHttpRequest (new)
+            const gmXhr = (typeof GM_xmlhttpRequest === 'function')
+            ? GM_xmlhttpRequest
+            : (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function')
+            ? GM.xmlHttpRequest
+            : null;
+
+            if (!gmXhr) {
+                // Fallback naar native fetch (let op CORS)
+                fetch(url, options).then(async r => {
+                    const txt = await r.text();
+                    if (r.ok) resolve({ ok: true, status: r.status, json: async () => JSON.parse(txt), text: async () => txt });
+                    else reject(new Error(`HTTP ${r.status}: ${txt}`));
+                }).catch(reject);
+                return;
+            }
+
+            try {
+                gmXhr({
+                    method: options.method || 'GET',
+                    url,
+                    headers: options.headers || {},
+                    data: options.body || options.data || null,
+                    responseType: options.responseType || 'text',
+                    onload: cb,
+                    onerror: (err) => reject(err),
+                    ontimeout: (err) => reject(err),
+                });
+            } catch (e) {
+                reject(e);
+            }
+        });
+    }
+
+    // ----stijlen -----
+
+    function injectGlobalStyles() {
+        const style = document.createElement('style');
+        style.textContent = `
+    :root {
+        --gm-color-primary: #FF0000;
+        --gm-color-bg: #1e1e1e;
+        --gm-color-text: #fff;
+        --gm-color-muted: #ccc;
+        --gm-spacing-sm: 6px;
+        --gm-spacing-md: 12px;
+        --gm-spacing-lg: 20px;
+        --gm-radius: 8px;
+        --gm-shadow: 0 0 15px var(--gm-color-primary);
+    }
+    h2 {
+        color: red !important;
+    }
+
+    /* ====== Panels (uniforme basis) ====== */
+    .gm-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        height: 95%;
+        min-width: 00px;
+        max-width: 50%;
+        background: rgba(20,20,20,0.95);
+        color: var(--gm-color-text);
+        z-index: 10000;
+        overflow-y: auto;
+        padding: var(--gm-spacing-md);
+        box-shadow: -2px 0 6px rgba(0,0,0,0.6);
+        border: 2px solid var(--gm-color-primary);
+        border-radius: var(--gm-radius);
+        display: none;
+        will-change: auto; /* voorkom GPU constant repaints */
+        backface-visibility: hidden; /* stabiliseert rendering */
+    }
+    .gm-panel.active { display: block; }
+
+    /* Groottes */
+    .gm-panel-small  { width: 400px; min-height: 200px; }
+    .gm-panel-medium { width: 600px; min-height: 300px; }
+    .gm-panel-wide   { width: 800px; min-height: 400px; }
+
+    /* Panel header */
+    .gm-panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: var(--gm-spacing-md);
+    }
+    .gm-panel-title {
+        font-weight: bold;
+        color: var(--gm-color-primary);
+    }
+    .gm-close-btn {
+        background: none;
+        border: none;
+        color: var(--gm-color-primary);
+        font-size: 18px;
+        cursor: pointer;
+    }
+
+    /* ====== Buttons ====== */
+    #gm-button-container {
+        position:fixed;
+        top:1px;
+        left:380px;
+        display:inline-flex;
+        flex-direction:row;
+        gap:1px;
+        z-index:9999;
+        background:rgba(0,0,0,0.2);
+        padding:2px;
+        width:auto;
+        height:auto;
+    }
+    #gm-button-container .gm-toggle-button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 6px;
+        cursor: pointer;
+    }
+    .gm-button {
+        background: #000;
+        color: var(--gm-color-primary);
+        border: 1px solid var(--gm-color-primary);
+        padding: var(--gm-spacing-sm) var(--gm-spacing-md);
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 14px;
+    }
+    .gm-button:hover {
+        background: var(--gm-color-primary);
+        color: #fff;
+    }
+
+    /* ====== Inputs ====== */
+    .gm-input {
+        width: 100%;
+        padding: var(--gm-spacing-sm);
+        border-radius: 4px;
+        border: 1px solid #444;
+        background: #222;
+        color: var(--gm-color-text);
+    }
+
+    /* ====== Links ====== */
+    .gm-link {
+        display: inline-block;
+        background-color: var(--gm-color-primary);
+        color: #fff;
+        padding: 5px 10px;
+        font-size: 11px;
+        border-radius: 4px;
+        text-decoration: none;
+        margin-top: 5px;
+    }
+
+    /* ====== Notifications ====== */
+    .gm-notification {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        padding: var(--gm-spacing-sm) var(--gm-spacing-lg);
+        border-radius: var(--gm-radius);
+        color: #fff;
+        box-shadow: var(--gm-shadow);
+        animation: fadeIn 0.3s, fadeOut 0.3s 2.7s;
+        z-index: 10001;
+    }
+    .gm-notification.success { background-color: #4CAF50; }
+    .gm-notification.error { background-color: #F44336; }
+
+    /* ====== Helpers ====== */
+    .gm-muted { color: var(--gm-color-muted); font-size: 13px; }
+    .gm-card {
+        background: rgba(255,255,255,0.05);
+        padding: 8px;
+        border-radius: 6px;
+        font-weight: bold;
+        color: #FFCC66;
+        text-shadow: 1px 1px 2px #000;
+        font-size: 10px;
+        margin-top: 15px;
+    }
+    .gm-muted-box {
+        display: none;
+        margin-top: 15px;
+        background: #111;
+        padding: 10px;
+        border: 1px solid #444;
+        border-radius: 8px;
+        max-height: 300px;
+        overflow-y: auto;
+        font-size: 13px;
+        color: var(--gm-color-muted);
+    }
+
+    /* ====== Troop Manager (units) ====== */
+    /* Troopmanager unified styles */
+    #gm-panel-troopmanager .tm-units-row{
+      display:flex;
+      flex-wrap:wrap;
+      gap:6px;
+      align-items:center;
+      margin-top:4px;
+    }
+
+    /* individuele unit (sprite) — geen scaling hier: achtergrond-size wordt op runtime gezet */
+    #gm-panel-troopmanager .tm-unit{
+      display:block;
+      flex: 0 0 40px;
+      width:40px;
+      height:40px;
+      background-repeat:no-repeat;
+      background-position: 0 0; /* wordt overschreven inline door renderUnitIcon */
+      overflow:visible;
+      position:relative;
+      border-radius:4px;
+      box-shadow: 0 1px 0 rgba(0,0,0,0.25) inset;
+    }
+
+    /* aantal rechts-onder — zwart met witte 'stroke' voor leesbaarheid */
+    #gm-panel-troopmanager .tm-unit .tm-unit-count{
+      position: absolute;
+      right: 2px;
+      bottom: 2px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #fff;
+      background: rgba(0,0,0,0.8); /* donker balkje */
+      padding: 0 4px;
+      border-radius: 3px;
+      line-height: 14px;
+      text-shadow: none; /* geen witte outline meer */
+    }
+    #gm-panel-troopmanager .tm-units-grid {
+      display: grid;
+      grid-template-columns: 1fr; /* twee kolommen */
+      gap: 8px;
+    }
+    .tm-units-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;  /* ruimte tussen iconen */
+        margin-bottom: 10px;
+    }
+    .tm-unit {
+        position: relative;
+        width: 40px;   /* vaste breedte */
+        height: 40px;  /* vaste hoogte */
+    }
+    .tm-unit img {
+        width: 100%;
+        height: 100%;
+        display: block;
+    }
+    .tm-unit-count {
+        position: absolute;
+        bottom: 0;
+        right: 0;
+        background: rgba(0, 0, 0, 0.7);
+        color: #fff;
+        font-size: 11px;
+        padding: 1px 3px;
+        border-top-left-radius: 4px;
+    }
+    `;
+        document.head.appendChild(style);
+    }
+
+
+    function createPopup(id, title, contentHTML, sizeClass = 'gm-panel-medium') {
+        let popup = document.getElementById(id);
+        if (!popup) {
+            popup = document.createElement('div');
+            popup.id = id;
+            popup.className = `gm-panel ${sizeClass} `;
+            popup.innerHTML = `
+      <div class="gm-panel-header">
+        <span class="gm-panel-title">${title}</span>
+        <button class="gm-close-icon">✖</button>
+      </div>
+      <div class="gm-panel-body">${contentHTML}</div>
+    `;
+            document.body.appendChild(popup);
+
+            // sluit-handler (geen inline handlers)
+            popup.querySelector('.gm-close-icon').addEventListener('click', () => {
+                popup.classList.remove('active');
+            });
+        }
+        // retourneer popup element (nog niet openen)
+        return popup;
+    }
+
+    function openPopup(id) {
+        document.querySelectorAll('.gm-panel').forEach(el => el.classList.remove('active'));
+        const popup = document.getElementById(id);
+        if (popup) popup.classList.add('active');
+    }
 
     // =========================== //
     // Hoofdklasse GrepolisManager //
@@ -46,42 +373,25 @@
 
             return new Promise(resolve => {
                 const popup = document.createElement('div');
-                popup.style = `
-                position: fixed;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                z-index: 99999;
-                background: #1e1e1e;
-                border: 2px solid #FF0000;
-                padding: 20px;
-                color: white;
-                font-family: sans-serif;
-                width: 400px;
-                border-radius: 10px;
-                box-shadow: 0 0 20px red;
-            `;
+                popup.className = 'gm-panel gm-panel-small';
 
-               popup.innerHTML = `
-                <h2 style="color:#FF0000; text-align:center;">Supabase Configuratie</h2>
-                <p>Voer hieronder je Supabase gegevens in:</p>
-                <label>Supabase URL:<br>
-                    <input type="text" id="supabase-url" style="width: 100%; padding: 5px;" placeholder="https://xyz.supabase.co" />
-                </label><br><br>
-                <label>API Key:<br>
-                    <input type="text" id="supabase-key" style="width: 100%; padding: 5px;" placeholder="public-anon-key" />
-                </label><br><br>
-
-                <div style="display: flex; justify-content: space-between; align-items:center;">
-                    <button id="save-supabase" style="background: #FF0000; color: white; padding: 10px 20px; border: none; border-radius: 5px;">Opslaan</button>
-                    <button id="toggle-supabase-help" style="background: #333; color: #FF5555; padding: 6px 12px; border: 1px solid #FF0000; border-radius: 5px;">❔ Handleiding</button>
-                </div>
-
-                <div id="supabase-help" style="display:none; margin-top:15px; background:#111; padding:10px; border:1px solid #444; border-radius:8px; max-height:300px; overflow-y:auto; font-size:13px; color:#ccc;">
-                    <pre style="white-space:pre-wrap;">${SupabaseSettings.helpText()}</pre>
-                </div>
-            `;
-
+                popup.innerHTML = `
+                    <h2 class="gm-panel-title" style="text-align:center;">Supabase Configuratie</h2>
+                    <p>Voer hieronder je Supabase gegevens in:</p>
+                    <label>Supabase URL:<br>
+                        <input type="text" id="supabase-url" class="gm-input" placeholder="https://xyz.supabase.co" />
+                    </label><br><br>
+                    <label>API Key:<br>
+                        <input type="text" id="supabase-key" class="gm-input" placeholder="public-anon-key" />
+                    </label><br><br>
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <button id="save-supabase" class="gm-button">Opslaan</button>
+                        <button id="toggle-supabase-help" class="gm-button">❔ Handleiding</button>
+                    </div>
+                    <div id="supabase-help" class="gm-muted" style="display:none; margin-top:15px; max-height:300px; overflow-y:auto;">
+                        <pre>${SupabaseSettings.helpText()}</pre>
+                    </div>
+                `;
 
                 document.body.appendChild(popup);
 
@@ -108,51 +418,68 @@
 
         static helpText() {
             return `
-📦 SUPABASE GEBRUIKSHANDLEIDING VOOR GREPOLIS MANAGER
+            📦 SUPABASE GEBRUIKSHANDLEIDING VOOR GREPOLIS MANAGER
 
-Wat is Supabase?
-Supabase is een open-source alternatief voor Firebase. Dit script gebruikt het om gegevens veilig extern op te slaan (zoals troepen).
+            Wat is Supabase?
+            Supabase is een open-source alternatief voor Firebase. Dit script gebruikt het om gegevens veilig extern op te slaan (zoals troepen).
 
-────────────────────────────
-🔧 STAP 1: Maak een project aan
-────────────────────────────
-1. Ga naar https://supabase.com/
-2. Log in of registreer
-3. Klik op 'New Project'
-4. Geef een naam, regio en wachtwoord op
-5. Klik op 'Create'
+            ────────────────────────────
+            🔧 STAP 1: Maak een project aan
+            ────────────────────────────
+            1. Ga naar https://supabase.com/
+            2. Log in of registreer
+            3. Klik op 'New Project'
+            4. Geef een naam, regio en wachtwoord op
+            5. Klik op 'Create'
 
-────────────────────────────
-🔑 STAP 2: API-gegevens ophalen
-────────────────────────────
-1. Ga naar 'Settings' → 'API'
-2. Kopieer:
-   - Project URL (→ SUPABASE_URL)
-   - anon public key (→ SUPABASE_API_KEY)
+            ────────────────────────────
+            🔑 STAP 2: API-gegevens ophalen
+            ────────────────────────────
+            1. Ga naar 'Settings' → 'API'
+            2. Kopieer:
+               - Project URL (→ SUPABASE_URL)
+               - anon public key (→ SUPABASE_API_KEY)
 
-────────────────────────────
-📁 STAP 3: (Optioneel) Tabellen maken
-────────────────────────────
-Gebruik 'Table Editor' om bv. een 'troops' tabel aan te maken met:
-  player | town_id | unit | amount | timestamp
+            ────────────────────────────
+            📁 STAP 3: (Optioneel) Tabellen maken
+            ────────────────────────────
+            Gebruik 'Table Editor' om bv. een 'troops' tabel aan te maken met:
+              player | town_id | unit | amount | timestamp
 
-────────────────────────────
-⚙️ Gebruik in dit script
-────────────────────────────
-- Vul de gegevens hierboven in
-- Deze worden lokaal opgeslagen (veilig via GM_setValue)
-- Aanpassen kan later via Instellingen → Supabase
+            ────────────────────────────
+            ⚙️ Gebruik in dit script
+            ────────────────────────────
+            - Vul de gegevens hierboven in
+            - Deze worden lokaal opgeslagen (veilig via GM_setValue)
+            - Aanpassen kan later via Instellingen → Supabase
 
-────────────────────────────
-🧪 TEST
-────────────────────────────
-Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
-`.trim();
+            ────────────────────────────
+            🧪 TEST
+            ────────────────────────────
+            Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
+            `.trim();
         }
     }
 
     class GrepolisManager {
         constructor() {
+            // Ensure settings exist and include wereldInfoUrl (used by WereldInfo)
+            if (!this.settings) this.settings = {};
+            if (!this.settings.wereldInfoUrl) {
+                const defaultUrl = (this.config && this.config.wereldInfo && this.config.wereldInfo.wereldInfoUrl)
+                ? this.config.wereldInfo.wereldInfoUrl
+                : `https://${window.location.host}/game/world_info`;
+                this.settings.wereldInfoUrl = defaultUrl;
+            }
+
+            // Ensure wereldInfo config exists to avoid undefined errors
+            if (!this.config) this.config = {};
+            if (!this.config.wereldInfo) {
+                this.config.wereldInfo = {
+                    wereldInfoUrl: `https://${window.location.host}/game/world_info`
+                };
+            }
+
             this.uw = unsafeWindow;
             // Configuratie
             this.supabaseConfig = null;
@@ -163,30 +490,53 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
             this.buttonIcons = [
                 'iconGM',
                 'iconInstellingen',
-                'iconAttack',
-                'iconFeesten',
+                'iconWereldinfo',
                 'iconTroop',
-                'iconKaart',
-                'iconForum'
+                'iconForum',
             ];
 
             this.iconUrls = {}; // Slaat de icon URLs op
 
-            this.injectStyles();
+            this.config = {
+                wereldInfo: {
+                    wereldInfoUrl: `https://${window.location.host}/game/world_info` // voorbeeld
+                },
+            };
+
+            injectGlobalStyles();
             this.load(); // Start het asynchrone laadproces
-            this.tabs = [
-                {
-                    id: "dashboard",
-                    label: "Dashboard",
-                    render: (container) => this.renderDashboardTab(container),
-                },
-                {
-                    id: "spelers",
-                    label: "Spelers",
-                    render: (container) => this.renderPlayersTab(container),
-                },
-                // etc.
-            ];
+        }
+
+        openPanel(id, renderFn, sizeClass = 'gm-panel-medium') {
+            // Sluit bestaande panelen met dezelfde id
+            const old = document.getElementById(`gm-panel-${id}`);
+            if (old) old.remove();
+
+            // Paneel
+            const panel = document.createElement('div');
+            panel.id = `gm-panel-${id}`;
+            panel.className = `gm-panel ${sizeClass} active`;
+
+            // Sluitknop
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'gm-close-btn';
+            closeBtn.textContent = '×';
+            closeBtn.onclick = () => panel.remove();
+            panel.appendChild(closeBtn);
+
+            // Content-holder
+            const content = document.createElement('div');
+            content.className = 'gm-panel-body';
+            panel.appendChild(content);
+
+            // Inhoud renderen (exact één keer)
+            if (typeof renderFn === 'function') {
+                renderFn(content);
+            } else {
+                content.textContent = `Paneel geopend: ${id}`;
+            }
+
+            document.body.appendChild(panel);
         }
 
         async load() {
@@ -198,47 +548,47 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
             }
             this.supabaseConfig = await SupabaseSettings.loadOrPrompt();
             await this.loadResources();
-            await this.initializeManagers();
-            this.initializeButtons();
+            try {
+                await this.initializeManagers();
+            } catch (e) {
+                console.error('Fout in initializeManagers – ga toch door met knoppen:', e);
+            } finally {
+                this.initializeButtons();
+            }
             window.GrepoMain = this;
             console.log("Supabase config geladen:", this.supabaseConfig);
         }
 
         async initializeManagers() {
             this.modules.forumManager = new ForumManager(this);
-            this.modules.feestenManager = new FeestenFixedManager(this);
-            this.modules.attackRangeHelper = new AttackRangeHelperManager(this);
-            await this.modules.attackRangeHelper.initialize();
+            this.modules.wereldinfo = new WereldInfo(this);
+            this.afwezigheidsassistent = new Afwezigheidsassistent(this);
             this.modules.troopManager = new TroopManager(this, this.supabaseConfig);
             this.modules.troopManager.startAutoUploader();
-            this.modules.mapmanager = new MapManager(this);
             BigTransporterCapacity.activate();
             this.modules.mapOverlay = new MapOverlayModule(this);
             this.modules.mapOverlay.init();
+            this.supabaseSync = new SupabaseSync(this);
+            this.supabaseSync.start();
         }
 
         async loadResources() {
             // Laad alle resources en sla de URLs op
             try {
-                this.iconUrls.buttonOff = await this.getResource('buttonOff');
-                this.iconUrls.buttonOn = await this.getResource('buttonOn');
 
                 for (const icon of this.buttonIcons) {
+                    if (!icon) continue;
                     this.iconUrls[icon] = await this.getResource(icon);
                 }
             } catch (error) {
                 console.error('Fout bij laden resources:', error);
                 // Fallback naar directe URLs als GM_getResourceURL niet werkt
                 this.iconUrls = {
-                    buttonOff: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/button-off.png',
-                    buttonOn: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/button-on.png',
                     iconGM: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-GM.png',
                     iconInstellingen: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/instellingen.png',
-                    iconAttack: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-attackrange-helper.png',
-                    iconFeesten: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-feesten.png',
+                    iconWereldinfo: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/wereldinfo.png',
                     iconForum: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-forummanager.png',
-                    iconKaart: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-kaart.png',
-                    iconTroop: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-troopmanager.png'
+                    iconTroop: 'https://raw.githubusercontent.com/zambia1972/Grepolis-Manager/main/icons/icioon-troopmanager.png',
                 };
             }
         }
@@ -260,181 +610,147 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
             if (this.modules.mapOverlay) {
                 const overlaySettingsDiv = document.createElement("div");
                 overlaySettingsDiv.id = "overlay-settings";
-                overlaySettingsDiv.style.cssText = `
-        font-weight: bold;
-        text-shadow: 1px 1px 2px #000;
-        color: #FFCC66;
-        font-size: 10px;
-        line-height: 2.1;
-        min-width: 48px;
-        display: inline-block;
-        text-align: left;
-        margin-top: 15px;
-        background: rgba(255,255,255,0.05);
-        padding: 8px;
-        border-radius: 6px;
-    `;
+                overlaySettingsDiv.className = 'gm-card';
 
                 this.modules.mapOverlay.renderSettingsUI(overlaySettingsDiv);
-                popup.appendChild(overlaySettingsDiv);
+                container.appendChild(overlaySettingsDiv);
             }
         }
 
-        // ========= //
-        // Stijlen   //
-        // ========= //
-
-        injectStyles() {
-            const style = document.createElement('style');
-            style.textContent = `
-                #gm-button-container {
-                    position: fixed;
-                    top: 0px;
-                    left: 380px;
-                    z-index: 9999;
-                    display: flex;
-                    gap: 0px;
-                    padding: 3px;
-                }
-
-                .gm-toggle-button {
-                    width: 65px;
-                    height: 25px;
-                    background-size: cover;
-                    background-position: center;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    cursor: pointer;
-                    transition: all 0.3s;
-                }
-
-                .gm-toggle-button img {
-                    height: 20px;
-                    pointer-events: none;
-                }
-
-                #gm-popup {
-                    position: fixed;
-                    top: 50%;
-                    left: 50%;
-                    width: 800px;
-                    max-width: 90%;
-                    height: 600px;
-                    max-height: 80vh;
-                    transform: translate(-50%, -50%);
-                    background: #1e1e1e;
-                    border: 2px solid #FF0000;
-                    border-radius: 10px;
-                    padding: 20px;
-                    color: white;
-                    z-index: 10000;
-                    box-shadow: 0 0 15px #FF0000;
-                    overflow-y: auto;
-                }
-
-                #gm-popup h2 {
-                    color: #FF0000;
-                    text-align: center;
-                    margin-top: 0;
-                }
-
-                .gm-toolbar {
-                    display: flex;
-                    justify-content: center;
-                    gap: 10px;
-                    margin-bottom: 20px;
-                }
-
-                .gm-toolbar button {
-                    background: black;
-                    color: #FF0000;
-                    border: 1px solid #FF0000;
-                    padding: 10px 20px;
-                    cursor: pointer;
-                    font-size: 14px;
-                    border-radius: 5px;
-                }
-
-                #gm-content {
-                    padding: 10px;
-                    text-align: center;
-                }
-                .gm-toggle-button:hover {
-                    transform: scale(1.05);
-                    box-shadow: 0 0 5px #FF0000;
-                }
-
-            `;
-            document.head.appendChild(style);
-        }
         // ============ //
         // initializers //
         // ============ //
 
         initializeButtons() {
+            // voorkom dubbele container
             if (document.getElementById('gm-button-container')) return;
 
             const container = document.createElement('div');
             container.id = 'gm-button-container';
+            document.body.appendChild(container);
 
+            // Titels (zichtbaar als tooltip)
             const buttonTitles = [
-                'Startscherm',
+                'Grepolis Manager Startscherm',
                 'Instellingen',
-                'AttackRange Helper',
-                'Feesten Manager',
+                'Wereldinfo',
                 'Troop Manager',
-                'Kaart',
-                'Forum Manager'
+                'Forum Manager',
+                'Afwezigheids Manager'
             ];
 
+            // callbacks (zelfde logica als jouw oorspronkelijke callbacks - roept module toggles etc. aan)
             const callbacks = [
+                // Startscherm in eigen GM-panel via showUI(...)
                 (active) => {
                     if (active) {
-                        this.showStartscreenPopup();
+                        this.openPanel("startscreen", (container) => this.showUI(container));
                     } else {
-                        const popup = document.getElementById('gm-popup');
-                        if (popup) popup.remove();
+                        document.getElementById('gm-panel-startscreen')?.remove();
                     }
                 },
-                () => this.settingsWindow.toggle(),
-                (active) => this.modules.attackRangeHelper.toggle(active),
-                (active) => this.modules.feestenManager.toggle(active),
-                (active) => this.modules.troopManager.toggle(active),
-                (active) => this.modules.mapmanager.toggle(active),
-                (active) => this.modules.forumManager.toggle(active),
+                // Instellingen
+                (active) => {
+                    if (active) {
+                        this.openPanel("settings", (container) => this.settingsWindow.render(container));
+                    } else {
+                        document.getElementById("gm-panel-settings")?.remove();
+                    }
+                },
+                // Wereldinfo
+                (active) => {
+                    if (active) {
+                        this.openPanel("wereldinfo", (container) => this.modules.wereldinfo.render(container));
+                    } else {
+                        document.getElementById("gm-panel-wereldinfo")?.remove();
+                    }
+                },
+
+                // Troop Manager
+                (active) => this.modules.troopManager?.toggle?.(active),
+
+                // Forum Manager
+                (active) => this.modules.forumManager?.toggle?.(active),
+                // Afwezigheids Manager
+                (active) => {
+                    if (active) {
+                        this.openPanel("afwezigheid", (container) => {
+                            this.afwezigheidsassistent?.renderSettings?.(container);
+                        });
+                    } else {
+                        document.getElementById("gm-panel-afwezigheid")?.remove();
+                    }
+                }
+
             ];
 
+            // Zorg dat buttonStates overeenkomen met aantal buttons
+            this.buttonStates = new Array(buttonTitles.length).fill(false);
+
+            // Sprite URL (hergebruikt wat je al gebruikte)
+            const spriteUrl = 'https://gpnl.innogamescdn.com/images/game/autogenerated/layout/layout_095495a.png';
+
+            // Bouw **alleen** de originele achtergrond-knoppen (één set)
             callbacks.forEach((callback, index) => {
                 const button = document.createElement('div');
-                button.className = 'gm-toggle-button';
-                button.title = buttonTitles[index]; // ✅ Tooltip bij hover
+                button.className = 'gm-toggle-button gm-original-button';
+                button.title = buttonTitles[index];
                 button.dataset.index = index;
-                button.style.backgroundImage = `url("${this.iconUrls.buttonOff}")`;
 
-                const icon = document.createElement('img');
-                icon.src = this.iconUrls[this.buttonIcons[index]];
-                button.appendChild(icon);
+                // basisstijl (sprite)
+                button.style.background = `url(${spriteUrl}) no-repeat -607px -182px`;
+                button.style.width = '32px';
+                button.style.height = '32px';
+                button.style.display = 'flex';
+                button.style.alignItems = 'center';
+                button.style.justifyContent = 'center';
+                button.style.cursor = 'pointer';
 
+                // overlay icon (indien beschikbaar uit je resources)
+                let iconEl;
+                if (this.buttonIcons && this.buttonIcons[index] && this.iconUrls && this.iconUrls[this.buttonIcons[index]]) {
+                    iconEl = document.createElement('img');
+                    iconEl.src = this.iconUrls[this.buttonIcons[index]];
+                    iconEl.style.width = '20px';
+                    iconEl.style.height = '20px';
+                    iconEl.style.pointerEvents = 'none';
+                } else {
+                    iconEl = document.createElement('span');
+                    iconEl.textContent = this.buttonIcons && this.buttonIcons[index] ? '' : '🏝️';
+                    iconEl.style.fontSize = '16px';
+                    iconEl.style.pointerEvents = 'none';
+                }
+                button.appendChild(iconEl);
+
+                // click handler: toggle state, wijzig spritepositie, en roep callback aan
                 button.addEventListener('click', () => {
-                    this.buttonStates[index] = !this.buttonStates[index];
-                    button.style.backgroundImage = this.buttonStates[index]
-                        ? `url("${this.iconUrls.buttonOn}")`
-                    : `url("${this.iconUrls.buttonOff}")`;
-                    callback(this.buttonStates[index]);
+                    const idx = Number(button.dataset.index);
+                    this.buttonStates[idx] = !this.buttonStates[idx];
+
+                    // visuele toggle (on/off sprite)
+                    button.style.background = this.buttonStates[idx]
+                        ? `url(${spriteUrl}) no-repeat -639px -214px`
+                    : `url(${spriteUrl}) no-repeat -607px -182px`;
+
+                    // roep module-callback aan (safe)
+                    try {
+                        callback(this.buttonStates[idx]);
+                    } catch (err) {
+                        console.error('GM button callback error:', err);
+                    }
                 });
 
                 container.appendChild(button);
             });
 
-            document.body.appendChild(container);
+            // klaar — container is al eenmaal in DOM geplaatst
         }
 
         // ================== //
         // Startscherm inhoud //
         // ================== //
 
-        showStartscreenPopup() {
+        showUI(container) {
             const playerName = this.modules.forumManager
             ? this.modules.forumManager.getPlayerName()
             : 'Speler';
@@ -443,27 +759,29 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
             const startButton = document.querySelector(`#gm-button-container .gm-toggle-button[data-index="${buttonIndex}"]`);
 
             if (this.buttonStates[buttonIndex]) {
-                this.buttonStates[buttonIndex] = false;
                 if (startButton) {
-                    startButton.style.backgroundImage = `url("${this.iconUrls.buttonOff}")`;
+                    startButton.style.background = 'url(https://gpnl.innogamescdn.com/images/game/autogenerated/layout/layout_095495a.png) no-repeat -607px -182px';
                 }
             }
 
             const popup = document.createElement('div');
             popup.id = 'gm-popup';
-            popup.innerHTML = `
+            container.innerHTML = `
 
                     <h2>Welkom ${playerName} bij Grepolis Manager</h2>
                     <p>Dit script combineert de kracht van populaire Grepolis-tools in één handige oplossing en nog veel meer.</p>
                     <p>Selecteer een module via de knoppenbalk bovenaan het scherm.</p>
                     <h3>Beschikbare modules:</h3>
                     <ul>
-                        <li><strong>AttackRange Helper</strong> - Toon aanvalsbereik</li>
-                        <li><strong>Feesten Manager</strong> - Beheer stadsfeesten</li>
-                        <li><strong>Troop Manager</strong> - Beheer je troepen</li>
-                        <li><strong>Forum Manager</strong> - Beheer forums en topics</li>
+                        <li><strong>⚙️ Instellingen</strong> – Pas je voorkeuren en Supabase-configuratie aan. Hier kun je ook API-keys of scriptopties beheren.</li>
+                        <li><strong>🌍 Wereldinfo</strong> – Geeft een overzicht van spelers, allianties, steden, veroveringen en ranglijsten uit de officiële Grepolis databestanden.</li>
+                        <li><strong>🪖 Troop Manager</strong> – Synchroniseer en beheer je troepen. Inclusief automatische uploader naar Supabase en visuele weergave per stad.</li>
+                        <li><strong>📜 Forum Manager</strong> – Automatiseer het aanmaken van fora en topics binnen de alliantie. Inclusief kant-en-klare sjablonen (ROOD, deff/off, cluster, enz.).</li>
+                        <li><strong>🕒 Afwezigheidsassistent</strong> – Stel je afwezigheid in zodat leiding en bondgenoten weten wanneer je niet beschikbaar bent.</li>
+                        <li><strong>🗺️ Map Overlay</strong> – Voeg extra informatie toe aan de wereldkaart (bijv. sectoren, filters, markeringen).</li>
+                        <li><strong>🚢 Big Transporter Capacity</strong> – Activeert automatisch de capaciteit-boost voor grote transporters in je stadsoverzicht.</li>
                     </ul>
-                <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px;">
+                    <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px;">
                     ${[
                 {
                     name: "Grepotools",
@@ -507,16 +825,7 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
                             <img src="${tool.img}" alt="${tool.name}" style="width: 50px; height: 50px;">
                             <p style="font-size: 12px; font-weight: bold;">${tool.name}</p>
                             <p style="font-size: 12px;">${tool.description}</p>
-                            <a href="${tool.url}" target="_blank" style="
-                                display: inline-block;
-                                background-color: #FF0000;
-                                color: white;
-                                padding: 5px 10px;
-                                font-size: 11px;
-                                border-radius: 4px;
-                                text-decoration: none;
-                                margin-top: 5px;
-                            ">Download script</a>
+                            <a href="${tool.url}" target="_blank" class="gm-link">Download script</a>
                         </div>
                     `).join('')}
                 </div>
@@ -525,43 +834,27 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
                     <p style="font-size: 12px; font-style: italic;">Het Grepolis Manager Team</p>
                     <div style="display: flex; justify-content: center; gap: 20px; margin-top: 10px;">
                         <div>
-                            <p style="font-size: 12px; font-weight: bold;">Elona</p>
-                            <img src="https://imgur.com/QxTgAHJ.png" alt="Elona Handtekening" style="width: 100px; height: auto; transform: rotate(${Math.floor(Math.random() * 30 - 15)}deg);">
-                        </div>
-                        <div>
                             <p style="font-size: 12px; font-weight: bold;">Zambia1972</p>
-                            <img src="https://imgur.com/uHRXM9u.png" alt="Zambia1972 Handtekening" style="width: 200px; height: auto; transform: rotate(${Math.floor(Math.random() * 30 - 15)}deg);">
+                            <img src="https://imgur.com/uHRXM9u.png" alt="Zambia1972 Handtekening" class="gm-signature-large">
                         </div>
+
+                    </div>
+                    <div>
+                        <p style="font-size: 14px;">© 2025 | Zambia1972 | boodtrap | Gevers Hans, All rights reserved.</p>
                     </div>
                 </div>
             `;
 
-            if (this.modules.mapOverlay) {
-                const overlaySettingsDiv = document.createElement("div");
-                overlaySettingsDiv.id = "overlay-settings";
-                this.modules.mapOverlay.renderSettingsUI(overlaySettingsDiv);
-                popup.appendChild(overlaySettingsDiv);
-            }
-
-
             const closeButton = document.createElement('button');
             closeButton.textContent = 'Sluiten';
-            closeButton.style.cssText = `
-                    display: block;
-                    margin: 20px auto 0;
-                    padding: 8px 20px;
-                    background: #FF0000;
-                    color: white;
-                    border: none;
-                    border-radius: 5px;
-                    cursor: pointer;
-                `;
+            closeButton.className = 'gm-close-btn';
+
             closeButton.addEventListener('click', () => {
                 popup.remove();
-                // Reset de knop status wanneer de popup wordt gesloten
                 this.buttonStates[buttonIndex] = false;
+
                 if (startButton) {
-                    startButton.style.backgroundImage = `url("${this.iconUrls.buttonOff}")`;
+                    startButton.style.background = 'url(https://gpnl.innogamescdn.com/images/game/autogenerated/layout/layout_095495a.png) no-repeat -607px -182px';
                 }
             });
 
@@ -572,18 +865,7 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
         showNotification(message, isSuccess = true) {
             const notification = document.createElement('div');
             notification.textContent = message;
-            notification.style.cssText = `
-                    position: fixed;
-                    top: 20px;
-                    right: 20px;
-                    padding: 10px 20px;
-                    background-color: ${isSuccess ? '#4CAF50' : '#F44336'};
-                    color: white;
-                    border-radius: 4px;
-                    z-index: 10001;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-                    animation: fadeIn 0.3s;
-                `;
+            notification.className = `gm-notification ${isSuccess ? 'success' : 'error'}`;
 
             document.body.appendChild(notification);
             setTimeout(() => {
@@ -598,37 +880,635 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
     // ============================== //
 
     class BaseManager {
+
         constructor(mainManager) {
             this.main = mainManager;
-            this.uw = mainManager.uw;
+            this.uw = mainManager?.uw || unsafeWindow;
+            this._events = new WeakMap();
+            this._intervals = new Set();
+            this._timeouts = new Set();
+            this.logger = this._createLogger();
+            this.accessToken = (typeof GM_getValue === 'function') ? GM_getValue('grepodata_token', null) : null;
+        }
+
+        _createLogger() {
+            const prefix = `[${this.constructor.name}]`;
+            return {
+                log: (...args) => console.log(prefix, ...args),
+                warn: (...args) => console.warn(prefix, ...args),
+                error: (...args) => console.error(prefix, ...args),
+                debug: (...args) => (typeof DEBUG !== 'undefined' && DEBUG) && console.debug(prefix, ...args),
+            };
+        }
+
+        addEvent(element, event, handler, options) {
+            if (!element) return;
+            element.addEventListener(event, handler, options);
+            const handlers = this._events.get(element) || [];
+            handlers.push({ event, handler, options });
+            this._events.set(element, handlers);
+        }
+
+        removeEvents(element) {
+            if (!element) return;
+            const handlers = this._events.get(element);
+            if (!handlers) return;
+            for (const { event, handler, options } of handlers) {
+                try { element.removeEventListener(event, handler, options); } catch (e) { /* ignore */ }
+            }
+            this._events.delete(element);
+        }
+
+        // destroy() methode aanpassen:
+        destroy() {
+            // Alle events netjes verwijderen
+            for (const element of this._events.keys()) {
+                this.removeEvents(element);
+            }
+            this._events = new WeakMap();
+
+            // Eventuele timers stoppen
+            if (this._intervals) {
+                for (const id of this._intervals) {
+                    clearInterval(id);
+                }
+                this._intervals.clear();
+            }
+        }
+
+        // Hulpfunctie voor veilige token-logging
+        _maskToken(t) {
+            return t ? `${t.slice(0, 12)}…${t.slice(-6)}` : '(leeg)';
+        }
+
+        // Haal token op via GrepoData en zet het óók lokaal
+        async getAccessTokenFromGrepoData(email, password) {
+            try {
+                const url = 'https://api.grepodata.com/login';
+                const params = new URLSearchParams({ email, password });
+
+                // Oude token eerst weggooien (optioneel)
+                GM_deleteValue('grepodata_token');
+                GM_deleteValue('grepodata_token_time');
+
+                const resp = await gmFetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: params.toString(),
+                });
+                const data = await resp.json();
+
+                if (!resp.ok || !data?.access_token) {
+                    throw new Error(data?.message || 'Login mislukt');
+                }
+
+                const token = data.access_token;
+
+                // 📌 Pas nu opslaan
+                GM_setValue('grepodata_token', token);
+                GM_setValue('grepodata_token_time', Date.now());
+
+                // Handig om lokaal bij te houden
+                this.accessToken = token;
+
+                return token;
+            } catch (e) {
+                this.showNotification('Inloggen bij GrepoData mislukt.', false);
+                throw e;
+            }
+        }
+
+        showLoginPopup() {
+            return new Promise((resolve, reject) => {
+                const popupHtml = `
+      <div id="grepoLoginPopup" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+           background: white; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.2); z-index: 99999; min-width: 320px;">
+        <h3 style="margin-top:0">GrepoData API-token</h3>
+        <p>Ga naar <a href="https://grepodata.com/profile/api" target="_blank">https://grepodata.com/profile/api</a>, log in en kopieer daar je API-token.</p>
+        <label>API Token<br><input type="text" id="gd_token" style="width:100%"></label><br><br>
+        <div style="display:flex; gap:8px; justify-content:flex-end">
+          <button id="gd_cancel">Annuleren</button>
+          <button id="gd_save">Opslaan</button>
+        </div>
+        <div id="gd_msg" style="margin-top:8px; font-size:12px; color:#666;"></div>
+      </div>
+    `;
+                document.body.insertAdjacentHTML('beforeend', popupHtml);
+                const box = document.getElementById('grepoLoginPopup');
+                const elToken = document.getElementById('gd_token');
+                const elMsg   = document.getElementById('gd_msg');
+
+                const finish = (ok, value) => {
+                    box?.remove();
+                    ok ? resolve(value) : reject(value instanceof Error ? value : new Error(String(value)));
+                };
+
+                document.getElementById('gd_cancel').addEventListener('click', () => {
+                    finish(false, new Error("Login geannuleerd"));
+                });
+                document.getElementById('gd_save').addEventListener('click', async () => {
+                    const token = elToken.value.trim();
+                    if (!token) {
+                        elMsg.textContent = "Plak je token in.";
+                        return;
+                    }
+                    await GM_setValue('grepodata_token', token);
+                    await GM_setValue('grepodata_token_time', Date.now());
+                    elMsg.textContent = "Token opgeslagen.";
+                    finish(true, token);
+                });
+            });
+        }
+
+        // Centrale toegangspunt voor het token (wacht op login indien nodig)
+        async getWebSocketToken() {
+            // 1. Als er al een geldig token in memory zit
+            if (this.accessToken) {
+                return this.accessToken;
+            }
+
+            // 2. Check storage
+            try {
+                const stored = GM_getValue('grepodata_token', null);
+                const ts     = GM_getValue('grepodata_token_time', 0);
+
+                // Controleer of ouder dan 24 uur
+                const expired = !ts || (Date.now() - ts > 24 * 60 * 60 * 1000);
+
+                if (stored && !expired) {
+                    this.accessToken = stored;
+                    return stored;
+                }
+            } catch (e) {
+                console.warn("[GrepoData] Kon token niet laden uit storage:", e);
+            }
+
+            // 3. Geen of verlopen token → login-popup tonen
+            console.warn("[GrepoData] Nieuw token nodig. Toon login-popup…");
+            const token = await this.showLoginPopup();
+            this.accessToken = token;
+            GM_setValue('grepodata_token', token);
+            GM_setValue('grepodata_token_time', Date.now());
+            return token;
+        }
+
+        async getPlayerIntel(world, playerId) {
+            if (!this.accessToken) throw new Error("Geen accessToken beschikbaar");
+
+            const url = `https://api.grepodata.com/indexer/v2/player?world=${world}&player_id=${playerId}&access_token=${this.accessToken}`;
+
+            const response = await gmFetch(url, {
+                method: "GET",
+                headers: {
+                    "Accept": "application/json",
+                    "Authorization": `Bearer ${this.accessToken}`
+                }
+            });
+
+            return await response.json();
+        }
+
+
+        async getAllianceIntel(allianceId, world) {
+            if (!this.accessToken) throw new Error("Geen accessToken beschikbaar");
+
+            const url = `https://api.grepodata.com/indexer/v2/alliance?world=${world}&alliance_id=${allianceId}&access_token=${this.accessToken}`;
+            console.log("[GrepoData] GET AllianceIntel:", url);
+
+            const response = await gmFetch(url, {
+                method: "GET",
+                headers: {
+                    "Accept": "application/json",
+                    "Authorization": `Bearer ${this.accessToken}`
+                }
+            });
+
+            return await response.json();
+        }
+
+        async getTownIntel(townId, world) {
+            if (!this.accessToken) throw new Error("Geen accessToken beschikbaar");
+
+            const url = `https://api.grepodata.com/indexer/v2/town?world=${world}&town_id=${townId}&access_token=${this.accessToken}`;
+            console.log("[GrepoData] GET TownIntel:", url);
+
+            const response = await gmFetch(url, {
+                method: "GET",
+                headers: {
+                    "Accept": "application/json",
+                    "Authorization": `Bearer ${this.accessToken}`
+                }
+            });
+
+            return await response.json();
+        }
+
+        worldData = {
+            _cache: {
+                players: null,
+                alliances: null,
+                towns: null,
+                conquers: null,
+                islands: null,
+                kills_all: null,
+                kills_att: null,
+                kills_def: null
+            },
+            _lastWorld: null,
+            _lastHost: null,
+
+            _currentWorldHost() {
+                // vb: "nl123.grepolis.com"
+                return window.location.host;
+            },
+            _currentWorldPrefix() {
+                // vb: "nl123"
+                return window.location.host.split('.')[0];
+            },
+            _needsReset() {
+                const host = this._currentWorldHost();
+                if (this._lastHost !== host) {
+                    this._lastHost = host;
+                    this._lastWorld = this._currentWorldPrefix();
+                    // reset cache
+                    Object.keys(this._cache).forEach(k => this._cache[k] = null);
+                    return true;
+                }
+                return false;
+            },
+
+            async _fetchText(url, timeout = 10000) {
+                const controller = new AbortController();
+                const t = setTimeout(() => controller.abort(), timeout);
+                try {
+                    const res = await fetch(url, { signal: controller.signal, credentials: 'omit' });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    return await res.text();
+                } finally {
+                    clearTimeout(t);
+                }
+            },
+
+            _parseCSV(text) {
+                if (!text) return [];
+                const lines = text.trim().split(/\r?\n/);
+                // detecteer delimiter (eerste regel)
+                const header = lines[0] || '';
+                const commaCount = (header.match(/,/g) || []).length;
+                const tabCount = (header.match(/\t/g) || []).length;
+                const delim = tabCount > commaCount ? '\t' : ',';
+
+                const parseLine = (line) => {
+                    const result = [];
+                    let cur = '';
+                    let inQuotes = false;
+                    for (let i = 0; i < line.length; i++) {
+                        const ch = line[i];
+                        if (ch === '"') {
+                            // dubbele quote escape
+                            if (inQuotes && line[i+1] === '"') { cur += '"'; i++; }
+                            else { inQuotes = !inQuotes; }
+                        } else if (!inQuotes && line[i] === delim) {
+                            result.push(cur);
+                            cur = '';
+                        } else {
+                            cur += ch;
+                        }
+                    }
+                    result.push(cur);
+                    return result;
+                };
+
+                return lines.map(l => parseLine(l));
+            },
+
+            // --- Endpoints ---
+            async getPlayers() {
+                this._needsReset();
+                if (this._cache.players) return this._cache.players;
+
+                const host = `${Game.world_id}.grepolis.com`;
+                const url = `https://${host}/data/players.txt`;
+
+                const txt = await this._fetchText(url);
+                const rows = this._parseCSV(txt);
+                // 0 id, 1 name, 2 allyId, 3 points, 4 rank, 5 towns
+                const players = rows.map(r => ({
+                    id: +r[0], name: r[1], allianceId: +r[2] || 0,
+                    points: +r[3] || 0, rank: +r[4] || 0, towns: +r[5] || 0
+                }));
+                const byId = new Map(players.map(p => [p.id, p]));
+                this._cache.players = { list: players, byId };
+                return this._cache.players;
+            },
+
+            async getAlliances() {
+                this._needsReset();
+                if (this._cache.alliances) return this._cache.alliances;
+
+                const host = `${Game.world_id}.grepolis.com`;
+                const url = `https://${host}/data/alliances.txt`;
+
+                const txt = await this._fetchText(url);
+                const rows = this._parseCSV(txt);
+                // 0 id, 1 name, 2 points, 3 townCount, 4 playerCount, 5 rank
+                const alliances = rows.map(r => ({
+                    id: +r[0], name: r[1],
+                    points: +r[2] || 0, towns: +r[3] || 0, players: +r[4] || 0, rank: +r[5] || 0
+                }));
+                const byId = new Map(alliances.map(a => [a.id, a]));
+                this._cache.alliances = { list: alliances, byId };
+                return this._cache.alliances;
+            },
+
+            async getTowns() {
+                this._needsReset();
+                if (this._cache.towns) return this._cache.towns;
+
+                const host = `${Game.world_id}.grepolis.com`;
+                const url = `https://${host}/data/towns.txt`;
+
+                const txt = await this._fetchText(url);
+                const rows = this._parseCSV(txt);
+                // 0 townId, 1 playerId, 2 townName, 3 x, 4 y, 5 islandPos, 6 points
+                const towns = rows.map(r => ({
+                    id: +r[0], playerId: +r[1], name: r[2],
+                    x: +r[3], y: +r[4], islandPos: +r[5] || 0, points: +r[6] || 0
+                }));
+                const byId = new Map(towns.map(t => [t.id, t]));
+                const byPlayer = new Map();
+                for (const t of towns) {
+                    if (!byPlayer.has(t.playerId)) byPlayer.set(t.playerId, []);
+                    byPlayer.get(t.playerId).push(t);
+                }
+                this._cache.towns = { list: towns, byId, byPlayer };
+                return this._cache.towns;
+            },
+
+            async getConquers() {
+                this._needsReset();
+                if (this._cache.conquers) return this._cache.conquers;
+
+                const host = `${Game.world_id}.grepolis.com`;
+                const url = `https://${host}/data/conquers.txt`;
+
+                const txt = await this._fetchText(url);
+                const rows = this._parseCSV(txt);
+                const conquers = rows.map(r => ({
+                    townId: +r[0],
+                    time: +r[1],
+                    newPlayerId: +r[2] || 0,
+                    oldPlayerId: +r[3] || 0,
+                    newAllianceId: +r[4] || 0,
+                    oldAllianceId: +r[5] || 0,
+                    points: +r[6] || 0
+                }));
+                this._cache.conquers = conquers;
+                return conquers;
+            },
+
+            async getIslands() {
+                this._needsReset();
+                if (this._cache.islands) return this._cache.islands;
+
+                const host = `${Game.world_id}.grepolis.com`;
+                const url = `https://${host}/data/islands.txt`;
+
+                const txt = await this._fetchText(url);
+                const rows = this._parseCSV(txt);
+                const islands = rows.map(r => ({
+                    id: +r[0], x: +r[1], y: +r[2], type: +r[3] || 0,
+                    freeSlots: +r[4] || 0, bonusPlus: +r[5] || 0, bonusMinus: +r[6] || 0
+                }));
+                const byCoords = new Map(islands.map(i => [`${i.x}|${i.y}`, i]));
+                this._cache.islands = { list: islands, byCoords };
+                return this._cache.islands;
+            },
+
+            async getPlayerKillsAll() {
+                this._needsReset();
+                if (this._cache.kills_all) return this._cache.kills_all;
+
+                const host = `${Game.world_id}.grepolis.com`;
+                const url = `https://${host}/data/player_kills_all.txt`;
+
+                const txt = await this._fetchText(url);
+                const rows = this._parseCSV(txt);
+                const list = rows.map(r => ({ rank: +r[0], playerId: +r[1], points: +r[2] || 0 }));
+                this._cache.kills_all = list;
+                return list;
+            },
+
+
+            async getPlayerKillsAtt() {
+                this._needsReset();
+                if (this._cache.kills_att) return this._cache.kills_att;
+
+                const host = `${Game.world_id}.grepolis.com`;
+                const url = `https://${host}/data/player_kills_att.txt`;
+                const txt = await this._fetchText(url);
+                const rows = this._parseCSV(txt);
+                const list = rows.map(r => ({ rank: +r[0], playerId: +r[1], points: +r[2] || 0 }));
+                this._cache.kills_att = list;
+                return list;
+            },
+
+            async getPlayerKillsDef() {
+                this._needsReset();
+                if (this._cache.kills_def) return this._cache.kills_def;
+
+                const host = `${Game.world_id}.grepolis.com`;
+                const url = `https://${host}/data/player_kills_def.txt`;
+                const txt = await this._fetchText(url);
+                const rows = this._parseCSV(txt);
+                const list = rows.map(r => ({ rank: +r[0], playerId: +r[1], points: +r[2] || 0 }));
+                this._cache.kills_def = list;
+                return list;
+            },
+        };
+
+        // Kleine syntactic sugar helpers op BaseManager zelf
+        getPlayers = function() { return this.worldData.getPlayers(); };
+        getAlliances = function() { return this.worldData.getAlliances(); };
+        getTowns = function() { return this.worldData.getTowns(); };
+        getConquers = function() { return this.worldData.getConquers(); };
+        getIslands = function() { return this.worldData.getIslands(); };
+        getPlayerKillsAll = function() { return this.worldData.getPlayerKillsAll(); };
+        getPlayerKillsAtt = function() { return this.worldData.getPlayerKillsAtt(); };
+        getPlayerKillsDef = function() { return this.worldData.getPlayerKillsDef(); };
+
+
+        _createLogger() {
+            const prefix = `[${this.constructor.name}]`;
+            return {
+                log: (...args) => console.log(prefix, ...args),
+                warn: (...args) => console.warn(prefix, ...args),
+                error: (...args) => console.error(prefix, ...args),
+                debug: (...args) => DEBUG && console.debug(prefix, ...args)
+            };
+        }
+
+        async waitForElement(selector, timeout = 5000, context = document) {
+            const start = Date.now();
+            let element = null;
+
+            while (Date.now() - start < timeout && !element) {
+                element = context.querySelector(selector);
+                if (!element) await new Promise(r => setTimeout(r, 100));
+            }
+
+            if (!element) {
+                throw new Error(`Element ${selector} niet gevonden na ${timeout}ms`);
+            }
+            return element;
+        }
+
+        showNotification(message, isSuccess = true, duration = 3000) {
+            this.main.showNotification(message, isSuccess, duration);
+        }
+
+        async safeQuery(selector, timeout = 5000, context = document) {
+            try {
+                return await this.waitForElement(selector, timeout, context);
+            } catch (error) {
+                this.logger.warn(error.message);
+                return null;
+            }
+        }
+
+        addEvent(element, event, handler, options) {
+            element.addEventListener(event, handler, options);
+            this._trackEvent(element, event, handler);
+        }
+
+        _trackEvent(element, event, handler) {
+            if (!element) return;
+            if (!element.id) {
+                // geef een unieke GM id
+                element.dataset.gmId = element.dataset.gmId || ('gm_' + Math.random().toString(36).slice(2,9));
+            }
+            const key = `${element.id || element.dataset.gmId}-${event}`;
+            this._events.set(key, { element, event, handler });
+        }
+
+        setManagedInterval(fn, delay) {
+            const id = setInterval(() => {
+                try { fn(); } catch (err) { this.logger.error('Interval error:', err); }
+            }, delay);
+            this._intervals.add(id);
+            return id;
+        }
+        clearManagedInterval(id) {
+            clearInterval(id);
+            this._intervals.delete(id);
+        }
+        setManagedTimeout(fn, delay) {
+            const id = setTimeout(() => {
+                try { fn(); } catch (err) { this.logger.error('Timeout error:', err); }
+            }, delay);
+            this._timeouts.add(id);
+            return id;
+        }
+        clearManagedTimeout(id) {
+            clearTimeout(id);
+            this._timeouts.delete(id);
         }
 
         getPlayerName() {
-            // Methode 1: Via header element
-            const headerName = document.querySelector('.header_nickname');
-            if (headerName) return headerName.textContent.trim();
-
-            // Methode 2: Via game API (afhankelijk van Grepolis implementatie)
-            if (this.uw.Game && this.uw.Game.player_name) {
-                return this.uw.Game.player_name;
-            }
-
-            return 'Speler'; // Fallback als naam niet gevonden wordt
+            return this.uw.Game?.player_name ||
+                document.querySelector('.header_nickname')?.textContent?.trim() ||
+                'Speler';
         }
 
-        async waitForElementWithRetry(selector, timeout = 5000, maxRetries = 3) {
-            let retry = 0;
-            while (retry < maxRetries) {
-                try {
-                    const element = await this.waitForElement(selector, timeout);
-                    if (element) return element;
-                } catch (error) {
-                    retry++;
-                    if (retry >= maxRetries) throw error;
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                }
+        formatTime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            return [h, m, s].map(v => v.toString().padStart(2, '0')).join(':');
+        }
+
+        async waitForElement(selector, timeout = 5000, context = document) {
+            const start = Date.now();
+            let el = null;
+            while (Date.now() - start < timeout && !el) {
+                el = context.querySelector(selector);
+                if (!el) await new Promise(r => setTimeout(r, 100));
             }
-            throw new Error(`Element ${selector} niet gevonden na ${maxRetries} pogingen`);
+            if (!el) throw new Error(`Element ${selector} niet gevonden na ${timeout}ms`);
+            return el;
+        }
+        async safeQuery(selector, timeout = 5000, context = document) {
+            try { return await this.waitForElement(selector, timeout, context); }
+            catch (e) { this.logger.warn(e.message); return null; }
+        }
+
+        // cleanup all registered events/intervals/timeouts
+        destroy() {
+            // Events
+            try {
+                // WeakMap does not support for..of; iterate keys by temporarily storing them
+                const temp = [];
+                this._events && this._events.forEach === undefined
+                    ? null
+                : null;
+                // We cannot iterate WeakMap directly; keep a reference table on instance if needed.
+                // But because we stored arrays keyed by element, we rely on explicit removal points when removing UI.
+                // For safety: attempt to clear intervals/timeouts.
+            } catch (e) {
+                // ignore
+            }
+
+            // Intervals & timeouts
+            for (const id of Array.from(this._intervals)) { clearInterval(id); }
+            this._intervals.clear();
+            for (const id of Array.from(this._timeouts)) { clearTimeout(id); }
+            this._timeouts.clear();
+
+            this.logger.log('BaseManager cleanup (intervals/timeouts) voltooid');
+        }
+        async safeFetch(url, options = {}, timeout = 5000) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+            try {
+                const response = await fetch(url, {
+                    ...options,
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                return response;
+            } catch (error) {
+                clearTimeout(timeoutId);
+                throw new Error(`Fetch error: ${error.message}`);
+            }
+        }
+    }
+
+    class MyManager extends BaseManager {
+        async init() {
+            // Veilig element ophalen
+            const button = await this.safeQuery('#my-button');
+
+            // Event met automatische cleanup
+            this.addEvent(button, 'click', () => this.handleClick());
+
+            // Beheerd interval
+            this.setManagedInterval(() => this.updateData(), 5000);
+
+            // Netwerkrequest met timeout
+            try {
+                const data = await this.safeFetch('/api/data');
+            } catch (error) {
+                this.showNotification(error.message, false);
+            }
+        }
+
+        cleanup() {
+            this.destroy(); // Ruimt alles op
         }
     }
 
@@ -939,8 +1819,8 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
             content.innerHTML = `
                 <h2>Fora en Topics Aanmaken</h2>
                 <p>Klik op de knop hieronder om alle fora en topics in één keer aan te maken.</p>
-                <button id="start-creation" style="background: black; color: #FF0000; border: 1px solid #FF0000; padding: 10px 20px; cursor: pointer; font-size: 14px; border-radius: 5px;">Start Aanmaken</button>
-                <div id="status-messages" style="margin-top: 20px;"></div>
+                <button id="start-creation" class="gm-button">Start Aanmaken</button>
+                <div id="status-messages" style="margin-top:20px;"></div>
             `;
 
             const startButton = content.querySelector('#start-creation');
@@ -1210,52 +2090,48 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
         }
 
         hideUI() {
-            const forumUI = document.getElementById('forum-manager-ui');
-            if (forumUI) forumUI.remove();
+            // sluit het standaard GM-panel van dit onderdeel
+            const panel = document.getElementById('gm-panel-forum');
+            if (panel) panel.remove();
             this.main.showNotification('Forum Manager gesloten');
         }
 
         showUI() {
-            this.hideUI();
+            // render via het centrale paneel-mechanisme (voegt .active zelf toe)
+            this.main.openPanel('forum', (container) => {
+                container.innerHTML = `
+      <h2 class="gm-panel-title">Fora en Topics Aanmaken</h2>
+      <p>Deze actie maakt automatisch alle fora en topics aan in het alliantieforum.</p>
+      <label style="display:block;margin:10px 0;">
+          <input type="checkbox" id="confirmation-checkbox">
+          Ik weet wat ik doe en wil doorgaan
+      </label>
+      <button id="confirm-button" class="gm-button">Bevestig en toon aanmaakknop</button>
+      <div id="start-container" style="margin-top:15px;display:none;">
+          <button id="start-creation" class="gm-button">Start Aanmaken</button>
+      </div>
+      <div id="status-messages" style="margin-top:20px;"></div>
+    `;
 
-            const popupContainer = document.createElement('div');
-            popupContainer.id = 'forum-manager-ui';
-            popupContainer.style.cssText = `
-                position: fixed;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                background: #1e1e1e;
-                border: 2px solid #FF0000;
-                border-radius: 10px;
-                padding: 20px;
-                color: white;
-                z-index: 100;
-                box-shadow: 0 0 15px #FF0000;
-                width: 500px;
-                height: 400px;
-                max-width: 90%;
-                overflow-y: auto;
-            `;
+                // Gebruik container-scoped selectors (openPanel roept renderFn aan vóór appendChild)
+                const confirmBtn = container.querySelector('#confirm-button');
+                const checkbox = container.querySelector('#confirmation-checkbox');
+                const startContainer = container.querySelector('#start-container');
+                const startBtn = container.querySelector('#start-creation');
 
-            const content = document.createElement('div');
-            content.id = 'popup-content';
-            content.innerHTML = `
-                <h2 style="color:#FF0000;">Fora en Topics Aanmaken</h2>
-                <p>Deze actie maakt automatisch alle fora en topics aan in het alliantieforum. Bevestig eerst dat je dit wilt uitvoeren.</p>
-                <label style="display:block;margin:10px 0;">
-                    <input type="checkbox" id="confirmation-checkbox">
-                    Ik weet wat ik doe en wil doorgaan
-                </label>
-                <button id="confirm-button" style="background:black;color:#FF0000;border:1px solid #FF0000;padding:8px 16px;border-radius:5px;cursor:pointer;">Bevestig en toon aanmaakknop</button>
-                <div id="start-container" style="margin-top:15px;display:none;">
-                    <button id="start-creation" style="background:#000;color:#FF0000;border:1px solid #FF0000;padding:10px 20px;cursor:pointer;font-size:14px;border-radius:5px;">Start Aanmaken</button>
-                </div>
-                <div id="status-messages" style="margin-top: 20px;"></div>
-            `;
+                confirmBtn.addEventListener('click', () => {
+                    if (checkbox.checked) {
+                        startContainer.style.display = 'block';
+                    } else {
+                        alert('Bevestig eerst dat je door wilt gaan.');
+                    }
+                });
 
-            popupContainer.appendChild(content);
-            document.body.appendChild(popupContainer);
+                if (startBtn) {
+                    startBtn.addEventListener('click', () => this.createAllForaAndTopics());
+                }
+            }, 'gm-panel-medium');
+
 
             // Event listeners
             document.getElementById('confirm-button').addEventListener('click', () => {
@@ -1270,1627 +2146,2284 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
 
             document.getElementById('start-creation').addEventListener('click', () => this.createAllForaAndTopics());
         }
-
     }
 
-    // ==================== //
-    // FeestenFixed Manager //
-    // ==================== //
+    // ---------------------------
+    // --- Wereldinfo-------------
+    // ---------------------------
 
-    class FeestenFixedManager extends BaseManager {
+    class WereldInfo extends BaseManager {
         constructor(mainManager) {
             super(mainManager);
-            this.isActive = false;
-            this.container = null;
-            this.box = null;
-            this.initialized = false;
+            // Let op: geen hard-coded forumUrl hier. Wordt opgehaald uit instellingen in render().
+            this.keys = [
+                "Start","Wereldsnelheid","Eenhedensnelheid","Handelssnelheid","Beginnersbescherming",
+                "Kolonisatiesysteem","Eindspel","Duur opstand","Duur stad stichten","Boerendorpensysteem",
+                "Anti-timing regel","Goden","Premiumfuncties","Helden","Moraal","Nachtbonus",
+                "Alliantielimiet","Aantal startsteden","Speciale effecten","Artifact"
+            ];
+        }
+
+        async fetchForumHTML(url) {
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: "GET",
+                    url,
+                    onload: (res) => {
+                        if (res.status >= 200 && res.status < 300) resolve(res.responseText);
+                        else reject(new Error(`HTTP ${res.status}`));
+                    },
+                    onerror: (err) => reject(err)
+                });
+            });
+        }
+
+        _esc(s = "") {
+            return String(s)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+        }
+
+        cleanText(rawText) {
+            let t = rawText || "";
+            // verwijder JSON-blokken en veel voorkomende meta/ruis
+            t = t.replace(/\{[\s\S]*?\}/g, " ");
+            t = t.replace(/(Community Manager|Grepolis Team)[\s\S]*?\d{4}/gi, " ");
+            t = t.replace(/#\d+/g, " ");
+            // Zoek begin en eind
+            const startMatch = t.match(/Wereld\s+\w+\s+zal[\s\S]*?van start gaan!?/i);
+            const startIndex = startMatch ? t.indexOf(startMatch[0]) : -1;
+            const endIndex = t.search(/Met vriendelijke groet/i);
+            if (startIndex >= 0) {
+                t = t.slice(startIndex, endIndex > 0 ? endIndex : undefined);
+            } else if (endIndex > 0) {
+                t = t.slice(0, endIndex);
+            }
+            // Normaliseer whitespace maar behoud referentiële hoofdletters
+            t = t.replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ").trim();
+            // Breek aaneengeschreven woorden bij lowercase+Uppercase (help bij parsing)
+            t = t.replace(/([a-zà-ÿ])([A-ZÀ-Ÿ])/g, "$1 $2");
+            return t;
+        }
+
+        splitIntoSegments(text) {
+            const segments = {};
+            const keys = this.keys;
+            const re = new RegExp("(" + keys.join("|") + ")([\\s\\S]*?)(?=" + keys.join("|") + "|$)", "gmi");
+            let m;
+            while ((m = re.exec(text)) !== null) {
+                const key = m[1].trim();
+                const seg = (m[2] || "").trim();
+                segments[key] = seg;
+            }
+            return segments;
+        }
+
+        splitSegment(segRaw) {
+            let seg = (segRaw || "").trim();
+            if (!seg) return { col2: "-", col3: "-" };
+            seg = seg.replace(/\s+/g, " ").trim();
+
+            // hyphens handling
+            const hyphenSpace = seg.indexOf(" -");
+            if (hyphenSpace >= 0) {
+                const left = seg.slice(0, hyphenSpace).trim();
+                const right = seg.slice(hyphenSpace).replace(/^[-\s]+/, "-").trim();
+                return { col2: left || "-", col3: right || "-" };
+            }
+            if (seg.endsWith("-")) {
+                const left = seg.slice(0, -1).trim();
+                return { col2: left || "-", col3: "-" };
+            }
+
+            // date pattern
+            const dateRe = /^(maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag)\s+\d{1,2}\s+[a-zA-Z]+/i;
+            const dateMatch = seg.match(dateRe);
+            if (dateMatch) {
+                const col2 = dateMatch[0].trim();
+                const col3 = seg.slice(dateMatch[0].length).trim() || "-";
+                return { col2, col3 };
+            }
+
+            // "X dagen" / "X uur"
+            const daysMatch = seg.match(/^(\d+\s+dagen\b)/i);
+            if (daysMatch) {
+                const col2 = daysMatch[1].trim();
+                const col3 = seg.slice(daysMatch[1].length).trim() || "-";
+                return { col2, col3 };
+            }
+            const uurMatch = seg.match(/^(\d+\s*uur\b)/i);
+            if (uurMatch) {
+                const col2 = uurMatch[1].trim();
+                const col3 = seg.slice(uurMatch[1].length).trim() || "-";
+                return { col2, col3 };
+            }
+
+            // time range
+            const timeMatch = seg.match(/^(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})/);
+            if (timeMatch) {
+                const col2 = timeMatch[1].trim();
+                const col3 = seg.slice(timeMatch[1].length).trim() || "-";
+                return { col2, col3 };
+            }
+
+            // markers heuristic: split where info words appear
+            const markers = [
+                "In de loop", "In de", "Spionage", "Handelen", "Belegering", "Normale",
+                "Battle Point", "Battle", "00:00", "voor alle", "Instant", "Actief",
+                "Handelen met", "Bandietenkampen"
+            ];
+            let earliest = -1;
+            const lcSeg = seg.toLowerCase();
+            for (const mk of markers) {
+                const idx = lcSeg.indexOf(mk.toLowerCase());
+                if (idx >= 0 && (earliest === -1 || idx < earliest)) {
+                    earliest = idx;
+                }
+            }
+            if (earliest > 0) {
+                const col2 = seg.slice(0, earliest).trim();
+                const col3 = seg.slice(earliest).trim() || "-";
+                return { col2: col2 || "-", col3: col3 || "-" };
+            }
+
+            // fallback heuristics
+            const tokens = seg.split(/\s+/);
+            if (tokens.length === 1) return { col2: seg, col3: "-" };
+            if (/^\d+$/.test(tokens[0]) || /^[\d:]+$/.test(tokens[0]) || /^[A-Za-z]{1,3}$/.test(tokens[0])) {
+                const col2 = tokens.shift();
+                const col3 = tokens.join(" ").trim() || "-";
+                return { col2, col3 };
+            }
+            if (tokens.length <= 3) return { col2: seg, col3: "-" };
+            const col2 = tokens.shift();
+            const col3 = tokens.join(" ").trim() || "-";
+            return { col2, col3 };
+        }
+
+        parseTableFromText(tableText) {
+            const segments = this.splitIntoSegments(tableText);
+            const rows = [];
+            for (const key of this.keys) {
+                if (!segments.hasOwnProperty(key)) continue;
+                const seg = segments[key] || "";
+                const { col2, col3 } = this.splitSegment(seg);
+                rows.push({
+                    col1: key,
+                    col2: col2 === "" ? "-" : col2,
+                    col3: col3 === "" ? "-" : col3
+                });
+            }
+
+            let html = `<table style="border-collapse:collapse;width:100%;margin:10px 0;">
+            <colgroup><col style="width:30%"><col style="width:35%"><col style="width:35%"></colgroup>
+            <thead>
+              <tr>
+                <th style="text-align:left;padding:6px;border-bottom:1px solid #666;">Omschrijving</th>
+                <th style="text-align:left;padding:6px;border-bottom:1px solid #666;">Wereldinstelling</th>
+                <th style="text-align:left;padding:6px;border-bottom:1px solid #666;">Informatie</th>
+              </tr>
+            </thead>
+            <tbody>`;
+            for (const r of rows) {
+                html += `<tr>
+                <td style="border:1px solid #333;padding:6px;vertical-align:top;">${this._esc(r.col1)}</td>
+                <td style="border:1px solid #333;padding:6px;vertical-align:top;">${this._esc(r.col2)}</td>
+                <td style="border:1px solid #333;padding:6px;vertical-align:top;">${this._esc(r.col3)}</td>
+            </tr>`;
+            }
+            html += `</tbody></table>`;
+            return html;
+        }
+
+        splitIntroTableOutro(cleaned) {
+            const marker = /De instellingen:/i;
+            const m = cleaned.match(marker);
+            if (!m) return { intro: cleaned, tableText: "", outro: "" };
+            const idx = cleaned.search(marker);
+            const intro = cleaned.slice(0, idx).trim();
+            const after = cleaned.slice(idx + m[0].length).trim();
+            const outroMarker = /(Wereld\s+\w+\s+zal in de loop|Met vriendelijke groet)/i;
+            const outroMatch = after.match(outroMarker);
+            if (outroMatch) {
+                const oidx = after.search(outroMarker);
+                return {
+                    intro,
+                    tableText: after.slice(0, oidx).trim(),
+                    outro: after.slice(oidx).trim()
+                };
+            } else {
+                return { intro, tableText: after.trim(), outro: "" };
+            }
+        }
+
+        async render(container) {
+            container.innerHTML = `<h2>🌍 Wereldinfo laden…</h2>`;
+            try {
+                // haal forum-url uit instellingen (niet hard-coded)
+                const forumUrl = await GM_getValue("wereldinfo_url", null);
+                if (!forumUrl) {
+                    container.innerHTML = `
+                    <h2>🌍 Wereldinfo</h2>
+                    <p style="color:#c33;">Geen forum-link ingesteld voor wereldinfo.</p>
+                    <p>Ga naar Instellingen en vul bij "Wereldinfo URL" de forum-link in (bv. het aankondigingstopic).</p>
+                    <button id="gm-open-settings" class="gm-button">Open Instellingen</button>
+                `;
+                    // voeg knop-event toe (indien instellingen beschikbaar in main)
+                    container.querySelector("#gm-open-settings")?.addEventListener("click", () => {
+                        if (this.main && typeof this.main.openPanel === "function" && this.main.settingsWindow) {
+                            this.main.openPanel("settings", (c) => this.main.settingsWindow.render(c));
+                        } else {
+                            alert("Instellingen-paneel niet beschikbaar.");
+                        }
+                    });
+                    return;
+                }
+
+                const html = await this.fetchForumHTML(forumUrl);
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, "text/html");
+                const article = doc.querySelector("article");
+                if (!article) throw new Error("Geen <article>-element gevonden op de forumpagina.");
+
+                const rawText = article.innerText || "";
+                const cleaned = this.cleanText(rawText);
+
+                let imgEl = article.querySelector("img[src*='new_world']") || article.querySelector("img");
+                const imgHtml = imgEl ? `<div style="text-align:center;margin-bottom:10px;"><img src="${this._esc(imgEl.src)}" style="max-width:260px;"></div>` : "";
+
+                const { intro, tableText, outro } = this.splitIntroTableOutro(cleaned);
+                const tableHtml = tableText ? this.parseTableFromText(tableText) : `<p style="color:#999;">Geen instellingen gevonden.</p>`;
+
+                const wereldNaam = (forumUrl.match(/wereld-([^-]+)/i) || [])[1] || (this.uw.Game?.world_id || "Onbekend");
+
+                container.innerHTML = `
+                <h2 style="margin-bottom:10px;">🌍 Wereldinfo (${this._esc(wereldNaam)})</h2>
+                ${imgHtml}
+                <div style="white-space:pre-line;margin-bottom:12px;">${this._esc(intro)}</div>
+                ${tableHtml}
+                <div style="white-space:pre-line;margin-top:12px;color:inherit;">${this._esc(outro)}</div>
+                <p class="gm-muted" style="margin-top:8px;font-size:12px;">Bron: <a href="${this._esc(forumUrl)}" target="_blank">${this._esc(forumUrl)}</a></p>
+            `;
+            } catch (err) {
+                console.error("[WereldInfo] Fout:", err);
+                container.innerHTML = `<p style="color:red;">❌ Fout bij ophalen wereldinfo: ${this._esc(err.message)}</p>`;
+            }
+        }
+    }
+
+    class SupabaseSync {
+        constructor(main) {
+            this.main = main;
+            this.uw = main.uw;
             this.interval = null;
-            this.init();
-        }
-
-        init() {
-            if (this.initialized) return;
-            this.container = document.createElement('div');
-            this.container.id = 'feestenfixed-container';
-            this.container.style.position = 'fixed';
-            this.container.style.top = '2px';
-            this.container.style.right = '590px';
-            this.container.style.zIndex = '100';
-            this.container.style.display = 'none';
-            document.body.appendChild(this.container);
-
-            this.addStyles();
-            this.createUIElements();
-            this.initialized = true;
-        }
-
-        toggle(active) {
-            this.isActive = active;
-            if (this.isActive) {
-                this.show();
-                this.main.showNotification('Feesten Manager geactiveerd');
-            } else {
-                this.hide();
-                this.main.showNotification('Feesten Manager gedeactiveerd');
-            }
-        }
-
-        show() {
-            if (!this.container) return;
-            this.container.style.display = 'block';
-            this.box.style.display = 'block'; // direct tonen
-            this.isActive = true;
-            this.refreshContent();
-            this.interval = setInterval(() => this.refreshContent(), 10000);
-        }
-
-        hide() {
-            if (!this.container) return;
-            this.container.style.display = 'none';
-            this.box.style.display = 'none';
-            this.isActive = false;
-            if (this.interval) {
-                clearInterval(this.interval);
-                this.interval = null;
-            }
-        }
-
-        addStyles() {
-            const styleElement = document.createElement('style');
-            styleElement.textContent = `
-    .feestenFixedBox {
-        position: fixed;
-        top: 2px;
-        right: 590px;
-        background-color: rgba(97, 81, 52, 0.95);
-        width: 220px;
-        max-height: 200px;
-        overflow: auto;
-        display: none;
-        font-weight: bold;
-        text-shadow: 1px 1px 2px #000;
-        color: #FFCC66;
-        font-size: 10px;
-        line-height: 2.1;
-        min-width: 30px;
-        display: inline-block;
-        text-align: left;
-        z-index: 100; /* Lager dan popups, hoger dan standaard content */
-    }
-    .feestenFixedBox div {
-        margin: 1px 0;
-        padding: 1px;
-        background-color: rgba(255, 255, 255, 0.1);
-        border-radius: 3px;
-    }
-    .feestenFixedBox a {
-        color: #FF4444;
-        text-decoration: none;
-    }
-    .feestenFixedBox a:hover {
-        text-decoration: underline;
-    }
-    `;
-            document.head.appendChild(styleElement);
-        }
-
-        createUIElements() {
-            // Alleen de content box, geen knoppen
-            this.box = document.createElement('div');
-            this.box.className = 'feestenFixedBox';
-            this.container.appendChild(this.box);
-        }
-
-        refreshContent() {
-            if (!this.box || !this.isActive) return;
-
-            this.box.innerHTML = '';
-
-            try {
-                const celebrations = Object.values(unsafeWindow.MM.getModels().Celebration || {});
-                const towns = Object.values(unsafeWindow.ITowns.getTowns() || {});
-                let hasContent = false;
-
-                for (const town of towns) {
-                    const townId = town.getId();
-                    const townName = town.getName();
-                    const theaterLevel = town.buildings()?.attributes?.theater || 0;
-                    const academyLevel = town.buildings()?.attributes?.academy || 0;
-
-                    const hasParty = celebrations.some(c =>
-                                                       c.attributes?.town_id === townId &&
-                                                       c.attributes?.celebration_type === 'party'
-                                                      );
-
-                    const hasTheater = celebrations.some(c =>
-                                                         c.attributes?.town_id === townId &&
-                                                         c.attributes?.celebration_type === 'theater'
-                                                        );
-
-                    let message = '';
-                    if (theaterLevel === 1 && !hasTheater) {
-                        message += 'Activeer theater ';
-                    }
-                    if (academyLevel >= 30 && !hasParty) {
-                        message += 'Activeer SF ';
-                    }
-
-                    if (message) {
-                        hasContent = true;
-                        const townLink = this.generateTownLink(townId, townName);
-                        const msgElement = document.createElement('div');
-                        msgElement.innerHTML = `${townLink}: ${message}`;
-                        this.box.insertBefore(msgElement, this.box.firstChild);
-                    }
-                }
-
-                if (!hasContent) {
-                    const defaultMsg = document.createElement('div');
-                    defaultMsg.textContent = 'Alle SFs en theaters in gebruik';
-                    this.box.appendChild(defaultMsg);
-                }
-            } catch (error) {
-                const errorMsg = document.createElement('div');
-                errorMsg.textContent = 'Fout bij ophalen data';
-                errorMsg.style.color = '#FF4444';
-                this.box.appendChild(errorMsg);
-                console.error('FeestenFixed error:', error);
-            }
-        }
-
-        generateTownLink(townId, townName) {
-            const encodedData = btoa(JSON.stringify({
-                id: townId,
-                ix: 436,
-                iy: 445,
-                tp: 'town',
-                name: townName
-            }));
-            return `<a href="#${encodedData}" class="gp_town_link">${townName}</a>`;
-        }
-    }
-
-    // ========================= //
-    // AttackRangeHelper Manager //
-    // ========================= //
-
-    class AttackRangeHelperManager extends BaseManager {
-        constructor(mainManager) {
-            super(mainManager);
-            this.townInterval = null;
-            this.rankingInterval = null;
-            this.isActive = false;
-            this.playerList = [];
-            this.townsList = [];
-            this.pPoints = 0;
-        }
-
-        async initialize() {
-            try {
-                this.setupRankingObserver();
-                this.injectStyles();
-                this.pPoints = await this.fetchPlayerPoints();
-                this.playerList = await this.loadPlayerData();
-                this.townsList = await this.loadTownData();
-            } catch (error) {
-                console.error("Fout bij initialiseren AttackRangeHelper:", error);
-            }
-        }
-
-        toggle(active) {
-            this.isActive = active;
-            if (this.isActive) {
-                this.start();
-                this.main.showNotification("AttackRange Helper geactiveerd");
-            } else {
-                this.stop();
-                this.main.showNotification("AttackRange Helper gedeactiveerd", false);
-            }
-        }
-
-        async fetchPlayerPoints(maxTries = 5) {
-            for (let i = 0; i < maxTries; i++) {
-                const uw = this.uw;
-                if (uw?.Game?.player_points) return uw.Game.player_points;
-                if (uw?.Game?.player_data?.points) return uw.Game.player_data.points;
-                if (uw?.grepolis?.player?.points) return uw.grepolis.player.points;
-
-                const el = document.querySelector('.player_points');
-                if (el) {
-                    const val = parseInt(el.textContent.replace(/\D/g, ''), 10);
-                    if (val > 0) return val;
-                }
-                await new Promise(res => setTimeout(res, 1000));
-            }
-            console.warn("Kon spelerspunten niet vaststellen");
-            return 0;
-        }
-
-        async loadPlayerData() {
-            try {
-                const response = await fetch("/data/players.txt");
-                const text = await response.text();
-                return text.trim().split(/\r?\n/);
-            } catch (error) {
-                console.error("Fout bij laden spelersdata:", error);
-                return [];
-            }
-        }
-
-        async loadTownData() {
-            try {
-                const response = await fetch("/data/towns.txt");
-                const text = await response.text();
-                return text.trim().split(/\r?\n/);
-            } catch (error) {
-                console.error("Fout bij laden stedendata:", error);
-                return [];
-            }
         }
 
         start() {
-            if (this.isActive) return;
-            this.isActive = true;
+            if (this.interval) clearInterval(this.interval);
+            // elke 15 minuten upload + download
+            this.interval = setInterval(() => {
+                this.upload();
+                this.download();
+            }, 15 * 60 * 1000);
 
-            const waitForDOM = setInterval(() => {
-                const shields = document.querySelectorAll(".city_shield");
-                if (shields.length > 0) {
-                    clearInterval(waitForDOM);
-                    this.townColoring();
-                    this.townInterval = setInterval(() => this.townColoring(), 2500);
-                } else {
-                    console.log("[AttackRangeHelper] Wacht op .city_shield elementen...");
-                }
-            }, 1000);
+            // eerste keer direct
+            this.upload();
+            this.download();
         }
 
-        stop() {
-            this.isActive = false;
-            clearInterval(this.townInterval);
-            clearInterval(this.rankingInterval);
-            this.townInterval = null;
-            this.rankingInterval = null;
-            this.cleanupBlessings();
-        }
-
-        townColoring() {
-            const towns = document.querySelectorAll('.flag.town');
-            if (!towns.length) return;
-
-            for (const town of towns) {
-                try {
-                    const shieldElement = town.parentElement.querySelector('.city_shield');
-                    if (!shieldElement) continue;
-
-                    const content = town.nextElementSibling?.getAttribute("href");
-                    if (!content) continue;
-
-                    const decoded = atob(content.substring(1));
-
-                    const getValue = (key) => {
-                        const regex = new RegExp(`"${key}":(\d+)`);
-                        const match = decoded.match(regex);
-                        return match ? match[1] : null;
-                    };
-
-                    const ix = getValue("ix");
-                    const iy = getValue("iy");
-                    const islandId = getValue("island");
-                    if (!ix || !iy || !islandId) continue;
-
-                    const search = `${ix},${iy},${islandId}`;
-                    const townData = this.townsList.find(t => t.includes(search));
-                    if (!townData) continue;
-
-                    const townArr = townData.split(',');
-                    const playerId = townArr[1];
-                    const playerData = this.playerList.find(p => p.startsWith(playerId + ','));
-                    if (!playerData) continue;
-
-                    const playerArr = playerData.split(',');
-                    const playerPoints = parseInt(playerArr[3], 10) || 0;
-
-                    shieldElement.classList.remove(
-                        "city_shield_blessing",
-                        "o_city_shield_blessing",
-                        "r_city_shield_blessing",
-                        "g_city_shield_blessing",
-                        "b_city_shield_blessing"
-                    );
-
-                    const isGhostTown = town.querySelector('.ghost') !== null;
-                    const inRange = playerPoints >= this.pPoints * 0.8333 && playerPoints <= this.pPoints * 1.2;
-
-                    let newClass = "city_shield_blessing";
-                    if (!inRange) {
-                        newClass = isGhostTown ? "o_city_shield_blessing" : "r_city_shield_blessing";
-                    } else {
-                        newClass = isGhostTown ? "g_city_shield_blessing" : "b_city_shield_blessing";
-                    }
-
-                    shieldElement.classList.add(newClass);
-
-                } catch (err) {
-                    console.error("Fout bij townColoring:", err);
-                }
-            }
-        }
-
-        cleanupBlessings() {
-            document.querySelectorAll('.r_city_shield_blessing, .o_city_shield_blessing, .b_city_shield_blessing, .g_city_shield_blessing')
-                .forEach(el => el.classList.remove(
-                'r_city_shield_blessing', 'o_city_shield_blessing', 'b_city_shield_blessing', 'g_city_shield_blessing'
-            ));
-        }
-
-        injectStyles() {
-            const css = `
-            .r_city_shield_blessing {
-                background: url(https://i.ibb.co/W05MsxT/dr-city-shield-blessing-a1471e5.png) no-repeat 0 0 !important;
-                width: 120px !important;
-                height: 72px !important;
-                pointer-events: none !important;
-            }
-
-            .o_city_shield_blessing {
-                background: url(https://i.ibb.co/X8cn1fK/r-city-shield-blessing-a1471e5.png) no-repeat 0 0 !important;
-                width: 120px !important;
-                height: 72px !important;
-                pointer-events: none !important;
-            }
-
-            .b_city_shield_blessing {
-                background: url(https://i.ibb.co/9crM5x6/b-city-shield-blessing-a1471e5.png) no-repeat 0 0 !important;
-                width: 120px !important;
-                height: 72px !important;
-                pointer-events: none !important;
-            }
-
-            .g_city_shield_blessing {
-                background: url(https://i.ibb.co/6YmdJVk/g-city-shield-blessing-a1471e5.png) no-repeat 0 0 !important;
-                width: 120px !important;
-                height: 72px !important;
-                pointer-events: none !important;
-            }
-
-        `;
-            GM_addStyle(css);
-        }
-
-        setupRankingObserver() {
-            const observer = new MutationObserver(() => {
-                const rankingButtons = document.querySelectorAll('.ranking.main_menu_item');
-                if (rankingButtons.length > 0) {
-                    rankingButtons[0].addEventListener('click', () => {
-                        this.startRankingColoring();
-                    });
-                    observer.disconnect();
-                }
-            });
-
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true
-            });
-        }
-
-        startRankingColoring() {
-            this.rankingInterval = setInterval(() => this.colorRanking(), 1000);
-        }
-
-        colorRanking() {
+        // Nieuwe methode: betrouwbare, ge-unifieerde leider-collector
+        async getAllianceLeaders() {
             try {
-                const points = document.querySelectorAll('.r_points');
-                points.forEach(point => {
-                    const value = parseInt(point.innerHTML.replace(/\D/g, ''), 10);
-                    if (!value) return;
+                // 1) eerst opgeslagen versie ophalen
+                const stored = await GM_getValue('leaders_list', []) || [];
 
-                    if (value < this.pPoints * 0.6666) {
-                        point.style.color = 'red';
-                    } else if (value < this.pPoints * 0.8333) {
-                        point.style.color = 'orange';
-                    } else if (value <= this.pPoints * 1.2) {
-                        point.style.color = 'green';
-                    } else {
-                        point.style.color = 'blue';
+                // 2) probeer DOM-scrape via de reeds aanwezige SettingsWindow (synchronous)
+                let dom = [];
+                try {
+                    if (this.main && this.main.settingsWindow && typeof this.main.settingsWindow.getAllianceLeaders === 'function') {
+                        dom = this.main.settingsWindow.getAllianceLeaders() || [];
+                    }
+                } catch (e) {
+                    console.warn("[SupabaseSync] DOM leaders scrape failed:", e);
+                }
+
+                // 3) merge (case-insensitive, behoud originele casing van eerste voorkomen)
+                const map = new Map();
+                [...stored, ...dom].forEach(name => {
+                    if (!name) return;
+                    const key = name.toString().trim().toLowerCase();
+                    if (!key) return;
+                    if (!map.has(key)) map.set(key, name.toString().trim());
+                });
+                const merged = Array.from(map.values());
+
+                // 4) persist merged back (so upload/hasAdminAccess can rely on storage)
+                await GM_setValue('leaders_list', merged);
+
+                return merged;
+            } catch (err) {
+                console.warn("[SupabaseSync] getAllianceLeaders error:", err);
+                return [];
+            }
+        }
+
+        // Upload: **sla alleen de handmatig ingestelde admin_list op**
+        async upload() {
+            const supabaseUrl = await GM_getValue("supabase_url", "");
+            const supabaseKey = await GM_getValue("supabase_api_key", "");
+            if (!supabaseUrl || !supabaseKey) return;
+
+            const world = this.uw.Game?.world_id || "unknown";
+
+            // Get all values at once for better performance
+            const [
+                wereldinfoUrl,
+                ban,
+                manualAdminList,
+                pin
+            ] = await Promise.all([
+                GM_getValue("wereldinfo_url", ""),
+                GM_getValue("banned_players", []),
+                GM_getValue("admin_list", []),
+                GM_getValue("settings_pin", "")
+            ]);
+
+            // Create base payload with required fields
+            const payload = {
+                world,
+                wereldinfo: wereldinfoUrl, // Use the retrieved wereldinfo_url
+                ban: JSON.stringify(ban),
+                admin: JSON.stringify(manualAdminList.filter(name => name && name.trim() !== '')), // Filter empty names immediately
+                pin
+            };
+
+            // Vraag leiders via centrale methode (synchroniseer storage + DOM indien mogelijk)
+            try {
+                const leaders = await this.getAllianceLeaders();
+                if (leaders && leaders.length > 0) {
+                    payload.Leiders = JSON.stringify(leaders);
+                }
+            } catch (e) {
+                console.warn("[SupabaseSync] Could not get leaders for upload:", e);
+            }
+
+            try {
+                // First, try to update existing record if it exists
+                let res = await fetch(`${supabaseUrl}/rest/v1/instellingen?world=eq.${world}`, {
+                    method: "PATCH",
+                    headers: {
+                        "apikey": supabaseKey,
+                        "Authorization": `Bearer ${supabaseKey}`,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                // If update fails with 404, try to insert new record
+                if (res.status === 404) {
+                    res = await fetch(`${supabaseUrl}/rest/v1/instellingen`, {
+                        method: "POST",
+                        headers: {
+                            "apikey": supabaseKey,
+                            "Authorization": `Bearer ${supabaseKey}`,
+                            "Content-Type": "application/json",
+                            "Prefer": "resolution=merge-duplicates"
+                        },
+                        body: JSON.stringify(payload)
+                    });
+                }
+                if (!res.ok) throw new Error(await res.text());
+                console.log("[SupabaseSync] Upload OK", payload);
+            } catch (err) {
+                console.error("[SupabaseSync] Upload failed", err);
+            }
+            console.log("[SupabaseSync] Using key prefix:", (supabaseKey || "").slice(0,10));
+        }
+
+        // Download blijft hetzelfde (haalt admin_list van Supabase indien aanwezig)
+        async download() {
+            const supabaseUrl = await GM_getValue("supabase_url", "");
+            const supabaseKey = await GM_getValue("supabase_api_key", "");
+            if (!supabaseUrl || !supabaseKey) return;
+
+            try {
+                const world = this.uw.Game?.world_id || "unknown";
+                const res = await fetch(`${supabaseUrl}/rest/v1/instellingen?world=eq.${world}&select=*`, {
+                    headers: {
+                        "apikey": supabaseKey,
+                        "Authorization": `Bearer ${supabaseKey}`
                     }
                 });
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                if (!data.length) return;
+
+                const latest = data[data.length - 1];
+
+                if (latest.wereldinfo) await GM_setValue("wereldinfo_url", latest.wereldinfo);
+                if (latest.ban) await GM_setValue("banned_players", JSON.parse(latest.ban));
+
+                // Only update admin list if it exists and is not empty
+                // Merge server admin list with local manual admin_list (zodat lokale wijzigingen niet zomaar verloren gaan)
+                if (latest.admin) {
+                    try {
+                        const serverAdmins = JSON.parse(latest.admin);
+                        if (Array.isArray(serverAdmins) && serverAdmins.length > 0) {
+                            const localAdmins = await GM_getValue("admin_list", []) || [];
+                            const mergedMap = new Map();
+                            // local first, then server (so lokal toegevoegd blijven indien aanwezig)
+                            [...localAdmins, ...serverAdmins].forEach(n => {
+                                const key = (n||"").toString().trim().toLowerCase();
+                                if (!key) return;
+                                if (!mergedMap.has(key)) mergedMap.set(key, n.toString().trim());
+                            });
+                            const merged = Array.from(mergedMap.values());
+                            await GM_setValue("admin_list", merged);
+                        }
+                    } catch (err) {
+                        console.warn("[SupabaseSync] Failed to merge admin_list:", err);
+                    }
+                }
+
+                // Merge leaders: combine server leaders and local leaders_list
+                if (latest.Leiders) {
+                    try {
+                        const serverLeaders = JSON.parse(latest.Leiders);
+                        if (Array.isArray(serverLeaders) && serverLeaders.length > 0) {
+                            const localLeaders = await GM_getValue("leaders_list", []) || [];
+                            const mergedMap = new Map();
+                            [...localLeaders, ...serverLeaders].forEach(n => {
+                                const key = (n||"").toString().trim().toLowerCase();
+                                if (!key) return;
+                                if (!mergedMap.has(key)) mergedMap.set(key, n.toString().trim());
+                            });
+                            const merged = Array.from(mergedMap.values());
+                            await GM_setValue("leaders_list", merged);
+                        }
+                    } catch (err) {
+                        console.warn("[SupabaseSync] Failed to merge leaders_list:", err);
+                    }
+                }
             } catch (err) {
-                console.error('Fout bij kleuren ranglijst:', err);
+                console.error("[SupabaseSync] Download failed", err);
             }
         }
     }
 
-    // ============= //
-    // Troop Manager //
-    // ============= //
+    // ================= //
+    // Troop Manager     //
+    // ================= //
 
     class TroopManager {
         constructor(manager, supabaseConfig) {
             this.manager = manager;
             this.uw = unsafeWindow;
-            this.world = window.location.host.split('.')[0];
-            if (!this.world) this.world = "nl" + new Date().getFullYear().toString().slice(2);
+            this.world = window.location.host.split('.')[0] || ("nl" + new Date().getFullYear().toString().slice(2));
             this.currentData = null;
+            this.autoUploader = null;
+            this.islandCache = new Map(); // Cache for island data (x|y -> islandId)
+            this.islandCacheLoaded = false; // Track if island data is loaded
 
+            // Initialize and load island data
+            this.initializeIslandCache().catch(console.error);
+
+            // Basisconfig (kan in Instellingen overschreven worden via GM storage)
             this.CONFIG = {
-                SUPABASE_URL: supabaseConfig.SUPABASE_URL,
-                SUPABASE_API_KEY: supabaseConfig.SUPABASE_API_KEY,
-                UPLOAD_INTERVAL: 5 * 60 * 1000,
-                TROOP_ICONS_URL: 'https://gpnl.innogamescdn.com/images/game/autogenerated/units/unit_icons_40x40_66aaef2.png'
+                SUPABASE_URL: supabaseConfig?.SUPABASE_URL || "",
+                SUPABASE_API_KEY: supabaseConfig?.SUPABASE_API_KEY || "",
+                UPLOAD_INTERVAL: 5 * 60 * 1000, // 5 min
+                TROOP_ICONS_URL:
+                "https://gpnl.innogamescdn.com/images/game/autogenerated/units/unit_icons_40x40_66aaef2.png",
             };
 
-            // Troep icons
+            // Als live sprite gevonden → gebruik die & schaal juist
+            const live = this.findLiveSpriteUrl();
+            if (live) this.CONFIG.TROOP_ICONS_URL = live;
+            this.injectSpriteSizer(this.CONFIG.TROOP_ICONS_URL);
+
+            // Unit‑sprite offsets (left top)
             this.troopIcons = {
-                sword: '-320px 0', slinger: '-200px -280px', archer: '-40px -80px',
-                hoplite: '-240px -40px', rider: '-40px -280px', chariot: '-160px -80px',
-                catapult: '-120px -120px', minotaur: '-240px -240px', manticore: '0px -240px',
-                zyklop: '-240px -320px', harpy: '-120px -200px', medusa: '-80px -240px',
-                centaur: '-160px 0px', pegasus: '-280px -120px', cerberus: '-160px -40px',
-                fury: '0px -200px', griffin: '-80px -200px', calydonian_boar: '-80px -120px',
-                satyr: '-80px -280px', spartoi: '-280px -280px', ladon: '-240px -120px',
-                godsent: '-40px -200px', militia: '-200px -240px',
-                big_transporter: '0 -120px', bireme: '-40px -120px', attack_ship: '-120px -80px',
-                demolition_ship: '-200px 0px', small_transporter: '-240px -280px',
-                trireme: '-320px -200px', colonize_ship: '-40px -160px', sea_monster: '-120px -280px',
-                siren: '-160px -240px'
+                sword: "-320px 0",
+                slinger: "-200px -280px",
+                archer: "-40px -80px",
+                hoplite: "-240px -40px",
+                rider: "-40px -280px",
+                chariot: "-160px -80px",
+                catapult: "-120px -120px",
+                minotaur: "-240px -240px",
+                manticore: "0px -240px",
+                zyklop: "-240px -320px",
+                harpy: "-120px -200px",
+                medusa: "-80px -240px",
+                centaur: "-160px 0px",
+                pegasus: "-280px -120px",
+                cerberus: "-160px -40px",
+                fury: "0px -200px",
+                griffin: "-80px -200px",
+                calydonian_boar: "-80px -120px",
+                satyr: "-80px -280px",
+                spartoi: "-280px -280px",
+                ladon: "-240px -120px",
+                godsent: "-40px -200px",
+                militia: "-200px -240px",
+                big_transporter: "0 -120px",
+                bireme: "-40px -120px",
+                attack_ship: "-120px -80px",
+                demolition_ship: "-200px 0px",
+                small_transporter: "-240px -280px",
+                trireme: "-80px -80px",
+                colonize_ship: "-40px -160px",
+                sea_monster: "0 -160px",
+                siren: "-160px -280px",
             };
 
-            // Vertalingen
+            // NL‑labels
             this.unitTranslations = {
-                sword: 'Zwaardvechter',
-                slinger: 'Slingeraar',
-                archer: 'Boogschutter',
-                hoplite: 'Hopliet',
-                rider: 'Ruiter',
-                chariot: 'Strijdwagen',
-                catapult: 'Katapult',
-                minotaur: 'Minotaurus',
-                manticore: 'Manticore',
-                zyklop: 'Cycloop',
-                harpy: 'Harpij',
-                medusa: 'Medusa',
-                centaur: 'Centaur',
-                pegasus: 'Pegasus',
-                cerberus: 'Cerberus',
-                fury: 'Erinys',
-                griffin: 'Griffioen',
-                calydonian_boar: 'Calydonisch varken',
-                satyr: 'Sater',
-                spartoi: 'Spartoi',
-                ladon: 'Ladon',
-                godsent: 'Godsgezant',
-                militia: 'Militie',
-                big_transporter: 'Transportboot',
-                bireme: 'Bireem',
-                attack_ship: 'Vuurschip',
-                demolition_ship: 'Brander',
-                small_transporter: 'Snel transportschip',
-                trireme: 'Trireem',
-                colonize_ship: 'Kolonisatieschip',
-                sea_monster: 'Hydra',
-                siren: 'Sirene'
+                sword: "Zwaardvechter",
+                slinger: "Slingeraar",
+                archer: "Boogschutter",
+                hoplite: "Hopliet",
+                rider: "Ruiter",
+                chariot: "Strijdwagen",
+                catapult: "Katapult",
+                minotaur: "Minotaurus",
+                manticore: "Manticore",
+                zyklop: "Cycloop",
+                harpy: "Harpij",
+                medusa: "Medusa",
+                centaur: "Centaur",
+                pegasus: "Pegasus",
+                cerberus: "Cerberus",
+                fury: "Erinys",
+                griffin: "Griffioen",
+                calydonian_boar: "Calydonisch varken",
+                satyr: "Sater",
+                spartoi: "Spartoi",
+                ladon: "Ladon",
+                godsent: "Godsgezant",
+                militia: "Militie",
+                big_transporter: "Transportboot",
+                bireme: "Bireem",
+                attack_ship: "Vuurschip",
+                demolition_ship: "Brander",
+                small_transporter: "Snel transportschip",
+                trireme: "Trireem",
+                colonize_ship: "Kolonisatieschip",
+                sea_monster: "Hydra",
+                siren: "Sirene",
             };
 
-            this.setupStyles();
+            // UI
+            this.panel = null;
+            this.isOpen = false;
+            this.supportViewMode = "combined"; // "combined" | "detailed"
+            this.lastView = null;
+
         }
 
-        // Land units check
-        isLandUnit(unit) {
-            const landUnits = [
-                'sword', 'slinger', 'archer', 'hoplite', 'rider',
-                'chariot', 'catapult', 'minotaur', 'manticore',
-                'zyklop', 'harpy', 'medusa', 'centaur', 'pegasus',
-                'cerberus', 'fury', 'griffin', 'calydonian_boar',
-                'satyr', 'spartoi', 'ladon', 'godsent', 'militia'
-            ];
-            return landUnits.includes(unit);
-        }
+        // ============ //
+        // UI helpers //
+        // ============ //
 
-        // Sea units check
-        isSeaUnit(unit) {
-            const seaUnits = [
-                'big_transporter', 'bireme', 'attack_ship', 'demolition_ship',
-                'small_transporter', 'trireme', 'colonize_ship', 'sea_monster', 'siren'
-            ];
-            return seaUnits.includes(unit);
-        }
-
-        async show() {
+        safeDecode(str) {
+            if (!str || typeof str !== "string") return "";
             try {
-                const data = await this.fetchTroopData();
-                if (!data) {
-                    this.manager.showNotification("Geen troepdata gevonden.", false);
-                    return;
-                }
-                this.displayAllDataInPopup(data);
-            } catch (error) {
-                console.error("Fout bij tonen troepen:", error);
-                this.manager.showNotification("Fout bij tonen troepen.", false);
+                return decodeURIComponent(str.replace(/\+/g, " "));
+            } catch (e) {
+                console.warn("[TroopManager] decode fout:", str, e);
+                return str || "";
             }
         }
 
-        // Icon styling
-        getUnitIconStyle(unit) {
-            return `background-image: url(${this.CONFIG.TROOP_ICONS_URL}); background-position: ${this.troopIcons[unit] || '0 0'};`;
+        async loadWorldLookupCaches() {
+            const world = window.location.host.split('.')[0];
+            const baseUrl = `https://${world}.grepolis.com/data`;
+
+            // Towns
+            try {
+                const txt = await fetch(`${baseUrl}/towns.txt`).then(r => r.text());
+                this.townCache = new Map();
+                const rows = this._parseDataFileToRows(txt);
+                if (rows.length) {
+                    rows.forEach(row => {
+                        const t = this._extractTownFromRow(row);
+                        if (t && t.id) this.townCache.set(Number(t.id), { id: Number(t.id), name: this.safeDecode(String(t.name || "")), player_id: t.player_id ?? null });
+                    });
+                }
+            } catch (e) {
+                console.warn("[TroopManager] loadWorldLookupCaches (towns) fout:", e);
+                this.townCache = this.townCache || new Map();
+            }
+
+            // Players
+            try {
+                const txt = await fetch(`${baseUrl}/players.txt`).then(r => r.text());
+                this.playerCache = new Map();
+                const rows = this._parseDataFileToRows(txt);
+                rows.forEach(row => {
+                    const p = this._extractPlayerFromRow(row);
+                    if (p && p.id) this.playerCache.set(Number(p.id), this.safeDecode(String(p.name || "")));
+                });
+            } catch (e) {
+                console.warn("[TroopManager] loadWorldLookupCaches (players) fout:", e);
+                this.playerCache = this.playerCache || new Map();
+            }
+        }
+        getTownInfoById(townId) {
+            const id = Number(townId);
+            if (!Number.isFinite(id)) return { id: null, name: "", player_id: null };
+
+            // 1) townCache (preferred)
+            const cacheEntry = this.townCache?.get(id);
+            if (cacheEntry) {
+                return {
+                    id: cacheEntry.id ?? id,
+                    name: cacheEntry.name ?? "",
+                    player_id: cacheEntry.player_id ?? null
+                };
+            }
+
+            // 2) wereld map fallback (indien beschikbaar)
+            if (this._worldTownMap && this._worldTownMap[id]) {
+                const m = this._worldTownMap[id];
+                return { id, name: m.name || "", player_id: m.player_id ?? null };
+            }
+
+            // 3) ITowns API fallback
+            try {
+                const t = this.uw?.ITowns?.getTown?.(id);
+                if (t) {
+                    const ownerId = t?.player_id || (typeof t?.getPlayerId === "function" ? t.getPlayerId() : null);
+                    const name = t?.name || (typeof t?.getName === "function" ? t.getName() : "");
+                    return { id, name: name || "", player_id: ownerId ?? null };
+                }
+            } catch (e) { /* swallow */ }
+
+            return { id: null, name: "", player_id: null };
         }
 
-        showTroopDataInNewTab(data, title = 'Troepenoverzicht') {
-            const newWindow = window.open('', '_blank');
-            newWindow.document.write(`
-        <html>
-            <head><title>${title}</title></head>
-            <body>
-                ${this.generateTroopDataHTML(data)}
-            </body>
-        </html>
-    `);
-            newWindow.document.close();
+        getPlayerNameById(playerId) {
+            const id = Number(playerId);
+            if (!Number.isFinite(id)) return "";
+
+            // 1) playerCache (preferred)
+            const fromCache = this.playerCache?.get(id);
+            if (fromCache) return fromCache;
+
+            // 2) world mapping fallback
+            if (this._worldPlayerMap && this._worldPlayerMap[id]) return this._worldPlayerMap[id];
+
+            // 3) Game players fallback
+            try {
+                const gPlayers = this.uw?.Game?.players || this.uw?.players || null;
+                if (gPlayers && gPlayers[id] && gPlayers[id].name) return gPlayers[id].name;
+            } catch (e) { /* swallow */ }
+
+            return "";
         }
 
-        // Data display functions
-        displayAllDataInPopup(data) {
-            this.manager.toggleMainWindow();
-            const popup = document.getElementById('forum-popup');
-            const contentWrapper = document.createElement('div');
-            contentWrapper.className = 'tm-single-column';
+        /** Detecteer scheidingsteken (heuristiek op sample text) */
+        _detectDelimiter(sampleText) {
+            const candidates = ["\t", "|", ";", ","];
+            let best = candidates[0];
+            let bestCount = -1;
+            for (const d of candidates) {
+                const count = (sampleText.match(new RegExp(`\\${d}`, "g")) || []).length;
+                if (count > bestCount) {
+                    best = d;
+                    bestCount = count;
+                }
+            }
+            return best;
+        }
 
-            const grouped = this.groupDataByPlayer(data);
+        /** Parse text file in rijen van tokens (very defensive) */
+        _parseDataFileToRows(text) {
+            if (!text || !text.trim()) return [];
+            const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith("#"));
+            if (!lines.length) return [];
+            // Gebruik eerste paar lijnen om delimiter te bepalen
+            const sample = lines.slice(0, Math.min(10, lines.length)).join("\n");
+            const delim = this._detectDelimiter(sample);
+            const rows = [];
+            for (const line of lines) {
+                // verwijder aanhalingstekens rond velden en trim
+                const parts = line.split(delim).map(p => p.replace(/^"|"$/g, "").trim());
+                rows.push(parts);
+            }
+            return rows;
+        }
 
-            for (const playerName in grouped) {
-                const playerGroup = grouped[playerName];
-                const playerInfo = data.PlayerCL.find(p => p.playerName === playerName) || {};
+        /**
+ * Heuristisch: geef {id, name, player_id} voor een towns.txt-rij (token-array)
+ * Dit is robuust voor meerdere formaten — kiest eerste numerieke token als id,
+ * eerste token met letters als name, en de eerstvolgende numerieke token na name als player_id.
+ */
+        _extractTownFromRow(row) {
+            if (!row || !row.length) return null;
+            const tokens = row.map(t => (t || "").trim());
+            // id: eerste token dat puur numeriek is
+            let idIndex = tokens.findIndex(t => /^\d+$/.test(t));
+            if (idIndex === -1) idIndex = 0; // fallback
+            // name: eerste token (niet id) met letters
+            let nameIndex = tokens.findIndex((t, i) => i !== idIndex && /[A-Za-zÀ-ž]/.test(t));
+            if (nameIndex === -1) {
+                // fallback: kies de token direct na id (als die bestaat)
+                nameIndex = idIndex + 1 < tokens.length ? idIndex + 1 : idIndex;
+            }
+            // player_id: eerstvolgende numerieke token na nameIndex, of een andere numerieke token
+            let playerIndex = tokens.findIndex((t, i) => i !== idIndex && i > nameIndex && /^\d+$/.test(t));
+            if (playerIndex === -1) {
+                playerIndex = tokens.findIndex((t, i) => i !== idIndex && i !== nameIndex && /^\d+$/.test(t));
+            }
 
-                contentWrapper.innerHTML += `
-                <div class="tm-player-block">
-                    <h3>${playerName}</h3>
-                    <div>Culture Level: ${playerInfo.cultureLevel || '?'}</div>
-                    <div>Steden: ${playerInfo.playerVillages || playerGroup.length}</div>
-                    <div>Vrije slotjes: ${playerInfo.openSlots ?? '?'}</div>
-                    <hr>
-                </div>
-            `;
+            const id = parseInt(tokens[idIndex]) || null;
+            const name = tokens[nameIndex] || "";
+            const player_id = playerIndex !== -1 ? (parseInt(tokens[playerIndex]) || null) : null;
+            return { id, name, player_id };
+        }
 
-                playerGroup.forEach((entry) => {
-                    const wall = entry.wall || {};
-                    const home = entry.home?.units || {};
-                    const away = entry.away?.units || {};
-                    const support = entry.support?.units || {};
+        /**
+ * Heuristisch: geef {id, name} voor een players.txt-rij (token-array)
+ * - id: eerste numerieke token
+ * - name: eerste token met letters, niet hetzelfde index als id
+ */
+        _extractPlayerFromRow(row) {
+            if (!row || !row.length) return null;
+            const tokens = row.map(t => (t || "").trim());
+            let idIndex = tokens.findIndex(t => /^\d+$/.test(t));
+            if (idIndex === -1) idIndex = 0;
+            let nameIndex = tokens.findIndex((t, i) => i !== idIndex && /[A-Za-zÀ-ž]/.test(t));
+            if (nameIndex === -1) {
+                // fallback: kies token direct na id
+                nameIndex = idIndex + 1 < tokens.length ? idIndex + 1 : idIndex;
+            }
+            const id = parseInt(tokens[idIndex]) || null;
+            const name = tokens[nameIndex] || "";
+            return { id, name };
+        }
 
-                    contentWrapper.innerHTML += `
-                    <div class="tm-city-block">
-                        <strong>Stad:</strong> ${wall.town || 'Onbekend'}<br>
-                        Muur: ${wall.wall || 'N/A'}<br>
-                        Toren: ${wall.tower ? 'Ja' : 'Nee'}<br>
-                        Falanx: ${wall.phalanx ? 'Actief' : 'Inactief'}<br>
-                        God: ${wall.god || 'Onbekend'}
-                    </div>
-                    ${this.renderTroopCategory('Aanwezige troepen', home)}
-                    ${this.renderTroopCategory('Troepen buiten', away)}
-                    ${this.renderTroopCategory('Ondersteunende troepen', support)}
-                    ${this.renderOtherUnitsCategory(home, away, support)}
-                    <hr>
-                `;
+        findLiveSpriteUrl() {
+            // probeer detectUnitSpriteUrl, of andere heuristieken
+            const u = this.detectUnitSpriteUrl?.();
+            if (u) return u;
+            // fallback: probeer een bekende default
+            return this.CONFIG?.TROOP_ICONS_URL || null;
+        }
+
+        // plaats dit in je TroopManager klasse (bij de andere helper methods)
+        sleep(ms) {
+            return new Promise((resolve) => setTimeout(resolve, ms));
+        }
+
+        injectSpriteSizer(spriteUrl) {
+            try {
+                const id = "gm-troop-sprite-size";
+                const img = new Image();
+                img.crossOrigin = "anonymous";
+                img.onload = () => {
+                    const w = img.naturalWidth || 2000;
+                    let s = document.getElementById(id);
+                    const css = `#gm-panel-troopmanager .tm-unit { background-size: ${w}px auto !important; }`;
+                    if (s) {
+                        if (s.textContent !== css) s.textContent = css;
+                    } else {
+                        s = document.createElement("style");
+                        s.id = id;
+                        s.textContent = css;
+                        document.head.appendChild(s);
+                    }
+                };
+                img.onerror = () => console.warn("[TroopManager] kon sprite niet laden:", spriteUrl);
+                img.src = spriteUrl;
+            } catch (e) {
+                console.warn("injectSpriteSizer error", e);
+            }
+        }
+
+        detectUnitSpriteUrl() {
+            try {
+                const probes = [".unit_icon40", '[class*="unit_icon40"]', ".unit_icon"]; // fallback selectors
+                for (const sel of probes) {
+                    const el = document.querySelector(sel);
+                    if (!el) continue;
+                    const bg = getComputedStyle(el).backgroundImage;
+                    const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+                    if (m && m[1] && m[1].includes("unit_icons_40x40")) return m[1];
+                }
+            } catch (e) {}
+            return null;
+        }
+
+        clearTroopBody() {
+            const body = document.getElementById("gm-troop-body");
+            if (!body) return null;
+            body.innerHTML = "";
+            return body;
+        }
+
+        // Initialize and load island cache
+        async initializeIslandCache() {
+            try {
+                this.islandCache = new Map();
+                this.islandCacheLoaded = false;
+
+                const world = window.location.host.split('.')[0];
+                // Try different possible endpoints
+                const endpoints = [
+                    `https://${world}.grepolis.com/data/islands.txt`,
+                    `https://${world}.grepolis.com/data/world/islands.txt`,
+                    `https://${world}.grepolis.com/game/data/world/islands.txt`
+                ];
+
+                let text = '';
+                let lastError = null;
+
+                // Try each endpoint until one works
+                for (const url of endpoints) {
+                    try {
+                        const response = await fetch(url);
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+                        text = await response.text();
+                        break;
+                    } catch (err) {
+                        lastError = err;
+                        console.warn(`[TroopManager] Failed to load from ${url}:`, err.message);
+                    }
+                }
+
+                if (!text) {
+                    throw new Error(`Failed to load island data from any endpoint. Last error: ${lastError?.message}`);
+                }
+
+                let count = 0;
+
+                // Parse islands.txt - format: id;x;y;...
+                const lines = text.trim().split('\n');
+
+                lines.forEach((line, index) => {
+                    if (!line.trim()) return; // Skip empty lines
+
+                    // Try both comma and semicolon as delimiters
+                    let parts = line.includes(',') ? line.split(',') : line.split(';');
+
+                    if (parts.length < 3) {
+                        console.warn(`[TroopManager] Invalid line format at line ${index + 1}: ${line}`);
+                        return;
+                    }
+
+                    // Extract first 3 values (id, x, y) and trim whitespace
+                    const [id, x, y] = parts.slice(0, 3).map(s => s.trim());
+                    if (id && x && y) {  // Ensure none are empty strings
+                        const key = `${x}|${y}`;
+                        this.islandCache.set(key, id);
+                        count++;
+
+                    }
+                });
+
+                this.islandCacheLoaded = true;
+                return true;
+            } catch (error) {
+                console.error('[TroopManager] Error loading island data:', error);
+                this.islandCacheLoaded = false;
+                return false;
+            }
+        }
+
+        // Alias for backward compatibility
+        async loadIslandCache() {
+            return this.initializeIslandCache();
+        }
+
+        // Get island number from coordinates
+        getIslandNumber(x, y) {
+            try {
+
+                if (x === undefined || y === undefined || x === null || y === null) {
+                    console.warn('getIslandNumber: Missing coordinates', {x, y});
+                    return null;
+                }
+
+                if (!this.islandCache) {
+                    console.warn('Island cache not initialized');
+                    return null;
+                }
+
+                // Log cache size and first few entries for debugging
+                if (this.islandCache.size > 0 && !this._cacheLogged) {
+                    let count = 0;
+                    for (let [key, value] of this.islandCache) {
+                        if (++count >= 5) break;
+                    }
+                    this._cacheLogged = true;
+                }
+
+                // Convert to numbers to ensure consistent formatting
+                const xNum = Number(x);
+                const yNum = Number(y);
+
+                if (isNaN(xNum) || isNaN(yNum)) {
+                    console.warn('getIslandNumber: Invalid coordinates', {x, y, xNum, yNum});
+                    return null;
+                }
+
+                const key = `${xNum}|${yNum}`;
+                const islandId = this.islandCache.get(key);
+
+                return islandId || null;
+            } catch (error) {
+                console.error('Error in getIslandNumber:', error, {x, y});
+                return null;
+            }
+        }
+
+        // Panel DOM + events
+        initPanel() {
+            // voorkom dubbel aanmaken
+            if (this.panelReady) return;
+
+            // basis-paneel opbouwen (alle benodigde elementen direct in de HTML)
+            const panel = document.createElement("div");
+            panel.id = "gm-panel-troopmanager";
+            panel.className = "gm-panel gm-panel-medium";
+            panel.innerHTML = `
+      <div class="panel-header">
+  <button class="gm-close-btn">✖</button>
+  <h2 class="gm-title">Troop Manager</h2>
+  <span class="tm-small" style="font-size: 18px; color:rgb(100, 220, 250)">World: <b>${this.world}</b></span>
+</div>
+<div class="panel-body">
+  <div class="tm-header"
+     style="display:flex; justify-content:space-between; align-items:flex-start; gap:20px; margin-top:10px;">
+
+  <!-- Linker kolom: Filters -->
+  <div class="tm-filters"
+       style="display:flex; flex-direction:column; align-items:flex-start; gap:8px;">
+       <div style="font-size:16px; font-weight:bold; margin-bottom:4px;">Filters</div>
+    <label style="font-size:13px;">Speler:
+      <select id="tm-filter-player"><option value="">Alle</option></select>
+    </label>
+    <label style="font-size:13px;">Stad:
+      <select id="tm-filter-city"><option value="">Alle</option></select>
+    </label>
+    <label style="font-size:13px;">Eenheid:
+      <select id="tm-filter-unit"><option value="">Alle</option></select>
+    </label>
+    <label style="font-size:13px;">Eiland:
+  <select id="tm-filter-island"><option value="">Alle</option></select>
+</label>
+  </div>
+
+  <!-- Rechter kolom: Controls -->
+  <div class="tm-controls"
+       style="display:flex; flex-direction:column; align-items:flex-start; gap:8px;">
+       <div style="font-size:16px; font-weight:bold; margin-bottom:4px;">Helpers</div>
+    <select id="gm-troop-player-select"></select>
+    <button id="gm-troop-show">Toon speler</button>
+    <button id="gm-troop-upload">Upload mijn troepen</button>
+    <button id="gm-troop-export">Export CSV</button>
+  </div>
+</div>
+
+<!-- Body eronder -->
+<div id="gm-troop-body" class="tm-body" style="margin-top:12px; min-height:120px;"></div>
+    `;
+
+            // append en flags
+            document.body.appendChild(panel);
+            this.panel = panel;
+            this.panelReady = true;
+
+            // --- elementen referenties (panel-scoped zodat we geen clashes hebben) ---
+            const closeBtn   = panel.querySelector('.gm-close-btn');
+            const topPlayerSel = panel.querySelector('#gm-troop-player-select');
+            const btnShow    = panel.querySelector('#gm-troop-show');
+            const btnUpload  = panel.querySelector('#gm-troop-upload');
+            const btnExport  = panel.querySelector('#gm-troop-export');
+
+            // filter refs (bewaar op this zodat andere methods ze kunnen gebruiken)
+            this.playerFilter = panel.querySelector('#tm-filter-player');
+            this.cityFilter   = panel.querySelector('#tm-filter-city');
+            this.unitFilter   = panel.querySelector('#tm-filter-unit');
+
+            // body element (waar generateTroopDataHTML / showAllPlayersData renderen)
+            this.troopBodyEl = panel.querySelector('#gm-troop-body');
+
+            // --- event listeners (allemaal veilig: pas nadat de elementen bestaan) ---
+            if (closeBtn) {
+                closeBtn.addEventListener('click', () => this.closePanel?.());
+            }
+
+            if (btnShow) {
+                btnShow.addEventListener('click', () => {
+                    const val = topPlayerSel?.value;
+                    if (!val || val === '') return;
+                    if (val === "-ALL-") {
+                        // toon alle spelers
+                        const p = this.showAllPlayersData();
+                        if (p && typeof p.then === 'function') p.catch(e => console.error(e));
+                        return;
+                    }
+                    // toon één speler
+                    try { this.showPlayerData(val); } catch (e) { console.error(e); }
                 });
             }
 
-            popup.appendChild(contentWrapper);
-            document.body.appendChild(popup);
-        }
-
-        async showControlPanel() {
-            let popup = document.getElementById('gm-popup');
-            if (!popup) {
-                popup = document.createElement('div');
-                popup.id = 'gm-popup';
-                popup.style.cssText = `
-                    position: fixed;
-                    top: 50%;
-                    left: 50%;
-                    transform: translate(-50%, -50%);
-                    background: #1e1e1e;
-                    border: 2px solid #FF0000;
-                    border-radius: 10px;
-                    padding: 20px;
-                    color: white;
-                    z-index: 10001;
-                    box-shadow: 0 0 15px #FF0000;
-                    width: 450px;
-                    height: 200px;
-                    overflow-y: auto;
-                `;
-                document.body.appendChild(popup);
-
-                const contentDiv = document.createElement('div');
-                contentDiv.id = 'popup-content';
-                popup.appendChild(contentDiv);
+            if (btnUpload) {
+                btnUpload.addEventListener('click', () => {
+                    try { this.uploadTroopData(); } catch (e) { console.error(e); }
+                });
             }
 
-            const content = document.getElementById('popup-content');
-            content.innerHTML = `
-            <h2>Troop Manager</h2>
-            <div style="display: grid; gap: 15px; margin: 20px 0;">
-                <!-- Toon troepen -->
-                <div style="border: 1px solid #FF0000; padding: 10px; border-radius: 5px;">
-                    <h3 style="color: #FF0000;">Toon troepen</h3>
-                    <select id="player-select" style="padding: 5px; margin-bottom: 10px;">
-                        <option value="">Laden...</option>
-                    </select>
-                    <button id="show-player-data" class="troop-btn">Toon Data</button>
-                    <button id="export-all-data" class="troop-btn">Exporteer Alles</button>
-                </div>
-            </div>
-            <div id="troop-data-container"></div>
-        `;
+            if (btnExport) {
+                btnExport.addEventListener('click', () => {
+                    try { this.exportAllData(); } catch (e) { console.error(e); }
+                });
+            }
 
-            // Laad spelerslijst
-            await this.loadPlayerDropdown();
-
-            // Event listeners
-
-            document.getElementById('show-player-data').addEventListener('click', async () => {
-                const select = document.getElementById('player-select');
-                const selectedPlayer = select.value;
-
-                if (!selectedPlayer) {
-                    this.manager.showNotification("Selecteer eerst een speler", false);
-                    return;
-                }
-
-                if (selectedPlayer === "-ALL-") {
-                    await this.showAllPlayersData();
-                } else {
-                    const data = await this.fetchPlayerDataFromSupabase(selectedPlayer);
-                    if (data) {
-                        this.showTroopDataInNewTab(data, `${selectedPlayer}'s Troepen`);
-                    } else {
-                        this.manager.showNotification("Geen data gevonden voor deze speler", false);
-                    }
-                }
+            // filters: 'change' is fine (covers select)
+            [this.playerFilter, this.cityFilter, this.unitFilter].forEach(el => {
+                if (!el) return;
+                el.addEventListener('change', () => {
+                    try { this.applyFilters(); } catch (e) { console.error(e); }
+                });
             });
 
-            document.getElementById('export-all-data').addEventListener('click', this.exportAllData.bind(this));
+            // --- populatie dropdowns & data renderen ---
+            // 1) vul de player-select bovenaan (indien helper aanwezig)
+            try {
+                if (typeof this.loadPlayerDropdown === 'function') {
+                    // loadPlayerDropdown vermoedelijk vult #gm-troop-player-select
+                    this.loadPlayerDropdown();
+                }
+            } catch (e) {
+                console.error('loadPlayerDropdown failed', e);
+            }
+
+            // 2) render alle data en na afloop populateFilters()
+            try {
+                const maybe = this.showAllPlayersData();
+                if (maybe && typeof maybe.then === 'function') {
+                    maybe.then((data) => {
+                        try { if (typeof this.populateFilters === 'function') this.populateFilters(data); } catch (e) { console.error(e); }
+                    }).catch(err => {
+                        console.error('showAllPlayersData error', err);
+                        try { if (typeof this.populateFilters === 'function') this.populateFilters([]); } catch (e) { console.error(e); }
+                    });
+                } else {
+                    // sync return
+                    if (typeof this.populateFilters === 'function') {
+                        try { this.populateFilters(maybe || []); } catch (e) { console.error(e); }
+                    }
+                }
+            } catch (e) {
+                console.error('Error while rendering troop data', e);
+            }
+        }
+
+        openPanel() {
+            this.initPanel();
+            this.panel.classList.add("active");
+            this.isOpen = true;
+
+            // Alleen eerste keer automatisch alles tonen
+            if (!this.didAutoShowAll) {
+                this.didAutoShowAll = true;
+                this.showAllPlayersData();
+            }
+        }
+
+        closePanel() {
+            if (!this.panel) return;
+            this.panel.classList.remove("active");
+            this.isOpen = false;
+        }
+
+        rerenderLastView() {
+            if (!this.lastView) return;
+            if (this.lastView.type === "single") {
+                this.renderDataToPanel(this.lastView.data, this.lastView.title);
+            } else if (this.lastView.type === "all") {
+                const body = this.clearTroopBody();
+                if (!body) return;
+                body.innerHTML = "";
+                this.lastView.rows.forEach((row) => {
+                    const wrap = document.createElement("div");
+                    wrap.className = "tm-player-block";
+                    wrap.innerHTML = this.generateTroopDataHTML(row.data);
+                    body.appendChild(wrap);
+                });
+                this.openPanel();
+            }
+        }
+
+        toggleTroopManager() {
+            if (!this.panel) this.initPanel();
+            this.panel.classList.toggle("active");
+        }
+
+        toggle(active) {
+            if (active) {
+                this.openPanel();
+                this.manager?.showNotification?.("Troop Manager geopend");
+            } else {
+                this.closePanel();
+                this.manager?.showNotification?.("Troop Manager gesloten", false);
+            }
+        }
+
+        // =============== //
+        //  Supabase I/O   //
+        // =============== //
+        async getSupabaseConfig() {
+            try {
+                const url = (await GM_getValue("supabase_url", this.CONFIG.SUPABASE_URL || "")).trim();
+                const key = (await GM_getValue("supabase_api_key", this.CONFIG.SUPABASE_API_KEY || "")).trim();
+                return { url, key };
+            } catch {
+                return { url: this.CONFIG.SUPABASE_URL || "", key: this.CONFIG.SUPABASE_API_KEY || "" };
+            }
         }
 
         async loadPlayerDropdown() {
-            const select = document.getElementById('player-select');
+            const sel = document.getElementById("gm-troop-player-select");
+            if (!sel) return;
+            sel.innerHTML = "<option>Laden…</option>";
             try {
                 const players = await this.fetchAvailablePlayers();
-                select.innerHTML = `
-                <option value="">-- Selecteer een speler --</option>
-                <option value="-ALL-">-- Toon Alles --</option>
-                ${players.map(player => `
-                    <option value="${player}">${player}</option>
-                `).join('')}
-            `;
-            } catch (error) {
-                console.error("Fout bij laden spelers:", error);
-                select.innerHTML = `
-                <option value="">Fout bij laden spelerslijst</option>
-            `;
+                sel.innerHTML = [
+                    '<option value="-ALL-">-- Toon Alles --</option>',
+                    ...players.map((p) => `<option value="${p}">${p}</option>`),
+                ].join("");
+            } catch (err) {
+                sel.innerHTML = "<option>Fout bij laden</option>";
+                console.error("loadPlayerDropdown error", err);
             }
         }
 
         async fetchAvailablePlayers() {
             try {
-                const url = `${this.CONFIG.SUPABASE_URL}/rest/v1/troepen?select=player,world`;
-                const response = await fetch(url, {
-                    method: 'GET',
-                    headers: {
-                        'apikey': this.CONFIG.SUPABASE_API_KEY,
-                        'Authorization': `Bearer ${this.CONFIG.SUPABASE_API_KEY}`
-                    }
+                const { url, key } = await this.getSupabaseConfig();
+                const endpoint = `${url}/rest/v1/troepen?select=player,world`;
+                const res = await fetch(endpoint, {
+                    headers: { apikey: key, Authorization: `Bearer ${key}` },
                 });
-
-                if (!response.ok) throw new Error(`Fout bij ophalen spelers`);
-                const result = await response.json();
-
+                if (!res.ok) throw new Error("players fetch failed");
+                const result = await res.json();
                 return result
-                    .filter(entry =>
-                            (entry.world || '').trim().toLowerCase() === this.world.trim().toLowerCase()
-                           )
-                    .map(entry => entry.player);
-            } catch (error) {
+                    .filter((r) => (r.world || "").trim().toLowerCase() === this.world.trim().toLowerCase())
+                    .map((r) => r.player);
+            } catch (e) {
+                console.error("fetchAvailablePlayers error", e);
                 return [];
             }
         }
 
         async fetchPlayerDataFromSupabase(playerName) {
             try {
-                const url = `${this.CONFIG.SUPABASE_URL}/rest/v1/troepen?select=player,world,data&player=eq.${encodeURIComponent(playerName)}&world=eq.${encodeURIComponent(this.world)}`;
-                const response = await fetch(url, {
-                    method: 'GET',
-                    headers: {
-                        'apikey': this.CONFIG.SUPABASE_API_KEY,
-                        'Authorization': `Bearer ${this.CONFIG.SUPABASE_API_KEY}`,
-                        'Content-Type': 'application/json'
-                    }
+                const { url, key } = await this.getSupabaseConfig();
+                const endpoint = `${url}/rest/v1/troepen?select=player,world,data,timestamp,alliance&player=eq.${encodeURIComponent(
+                    playerName
+                )}&world=eq.${encodeURIComponent(this.world)}`;
+                const res = await fetch(endpoint, {
+                    headers: { apikey: key, Authorization: `Bearer ${key}` },
                 });
-
-                if (!response.ok) throw new Error(`Fout bij ophalen data`);
-                const result = await response.json();
-                return result.length > 0 ? result[0].data : null;
-            } catch (error) {
+                if (!res.ok) throw new Error("player data fetch failed");
+                const rows = await res.json();
+                return rows?.[0]?.data || null;
+            } catch (e) {
+                console.error("fetchPlayerDataFromSupabase error", e);
                 return null;
-            }
-        }
-
-        async showAllPlayersData() {
-            try {
-                const allData = await this.fetchAllPlayersData();
-                if (!allData.length) {
-                    this.manager.showNotification("Geen spelerdata gevonden", false);
-                    return;
-                }
-
-                const newWindow = window.open('', '_blank');
-                newWindow.document.write(`
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Alle Troep Data - ${new Date().toLocaleString()}</title>
-                <style>
-                    body { font-family: Arial, sans-serif; margin: 20px; }
-                    h1 { color: #FF0000; }
-                    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
-                    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-                    th { background-color: #f2f2f2; }
-                    tr:nth-child(even) { background-color: #f9f9f9; }
-                    .unit-icon {
-                        display: inline-block;
-                        width: 40px;
-                        height: 40px;
-                        background-image: url(${this.CONFIG.TROOP_ICONS_URL});
-                        position: relative;
-                    }
-                    .unit-count {
-                        position: absolute;
-                        bottom: 2px;
-                        right: 2px;
-                        background: rgba(0,0,0,0.7);
-                        color: white;
-                        padding: 2px 5px;
-                        border-radius: 3px;
-                        font-size: 12px;
-                    }
-                </style>
-            </head>
-            <body>
-                <h1>Troep Data - Alle Spelers</h1>
-                    ${allData.map(playerData => `
-                        <div style="page-break-after: always;">
-                            ${this.generateTroopDataHTML(playerData.data)}
-                        </div>
-                    `).join('')}
-                </body>
-                </html>
-            `);
-                newWindow.document.close();
-            } catch (error) {
-                console.error("Fout bij ophalen alle data:", error);
-                this.manager.showNotification("Fout bij laden alle data", false);
             }
         }
 
         async fetchAllPlayersData() {
             try {
-                const url = `${this.CONFIG.SUPABASE_URL}/rest/v1/troepen?select=player,world,data&world=eq.${encodeURIComponent(this.world)}`;
-                const response = await fetch(url, {
-                    headers: {
-                        "apikey": this.CONFIG.SUPABASE_API_KEY,
-                        "Authorization": `Bearer ${this.CONFIG.SUPABASE_API_KEY}`
-                    }
+                const { url, key } = await this.getSupabaseConfig();
+                const endpoint = `${url}/rest/v1/troepen?select=player,world,data,timestamp&world=eq.${encodeURIComponent(
+                    this.world
+                )}`;
+                const res = await fetch(endpoint, {
+                    headers: { apikey: key, Authorization: `Bearer ${key}` },
                 });
-
-                if (!response.ok) throw new Error("Kon alle spelerdata niet ophalen");
-                return await response.json();
-            } catch (error) {
+                if (!res.ok) throw new Error("all players fetch failed");
+                return await res.json();
+            } catch (e) {
+                console.error("fetchAllPlayersData error", e);
                 return [];
             }
         }
 
-        async exportAllData() {
-            try {
-                const allData = await this.fetchAllPlayersData();
-                if (!allData.length) {
-                    this.manager.showNotification("Geen data om te exporteren", false);
-                    return;
-                }
+        // ============== //
+        //  UI rendering  //
+        // ============== //
+        async showPlayerData(playerName) {
+            const data = await this.fetchPlayerDataFromSupabase(playerName);
+            if (!data) return this.manager?.showNotification?.("Geen data voor " + playerName, false);
+            this.currentData = data;
+            this.lastView = { type: "single", title: `${playerName} — Troepen`, data };
+            this.renderDataToPanel(data, `${playerName} — Troepen`);
+            this.openPanel();
+        }
 
-                let csvContent = 'Speler,Culture Level,Steden,Stad,Muur,Toren,Falanx,God,Unit Type,Unit,Count\n';
-
-                allData.forEach(item => {
-                    item.data.PlayerCL.forEach(player => {
-                        item.data.Wall.forEach((wall, index) => {
-                            const troops = item.data.Troepen[index] || { units: {} };
-                            Object.entries(troops.units).forEach(([unit, count]) => {
-                                csvContent += [
-                                    `"${player.playerName}"`,
-                                    player.cultureLevel,
-                                    player.playerVillages,
-                                    `"${wall?.town || 'Unknown'}"`,
-                                    wall?.wall || 'N/A',
-                                    wall?.tower ? 'Yes' : 'No',
-                                    wall?.phalanx ? 'Yes' : 'No',
-                                    `"${wall?.god || ''}"`,
-                                    this.isLandUnit(unit) ? 'Land' : (this.isSeaUnit(unit) ? 'Sea' : 'Other'),
-                                    `"${unit}"`,
-                                    count
-                                ].join(',') + '\n';
-                            });
-                        });
-                    });
-                });
-
-                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-                const link = document.createElement('a');
-                link.href = URL.createObjectURL(blob);
-                link.download = `alle_troepen_export_${new Date().toISOString().slice(0,10)}.csv`;
-                link.click();
-            } catch (error) {
-                console.error("Export fout:", error);
-                this.manager.showNotification("Export mislukt", false);
+        async showAllPlayersData() {
+            const all = await this.fetchAllPlayersData();
+            const body = this.clearTroopBody();
+            if (!body) return [];
+            if (!all?.length) {
+                body.innerHTML = '<div class="tm-small">Geen spelerdata gevonden</div>';
+                return [];
             }
+
+            all.forEach((row) => {
+                const wrap = document.createElement("div");
+                wrap.className = "tm-player-block";
+                wrap.innerHTML = this.generateTroopDataHTML(row.data);
+                body.appendChild(wrap);
+            });
+            this.lastView = { type: "all", rows: all };
+            this.openPanel();
+            return all; // Return the data for populateFilters
+        }
+
+        renderDataToPanel(data, title = "Troepen") {
+            const body = this.clearTroopBody();
+            if (!body) return;
+            const titleNode = document.createElement("div");
+            titleNode.style.marginBottom = "8px";
+            titleNode.innerHTML = `<div style="font-weight:700;color:#FF5555;">${title}</div>`;
+            body.appendChild(titleNode);
+            const container = document.createElement("div");
+            container.innerHTML = this.generateTroopDataHTML(data);
+            body.appendChild(container);
         }
 
         generateTroopDataHTML(data) {
             const grouped = this.groupDataByPlayer(data);
-            let html = '';
+            let html = "";
 
             for (const playerName in grouped) {
-                const playerGroup = grouped[playerName];
-                const playerInfo = data.PlayerCL.find(p => p.playerName === playerName) || {};
+                const group = grouped[playerName];
+                const pInfo = (data.PlayerCL || []).find((p) => p.playerName === playerName) || {};
 
                 html += `
-                <div style="margin-bottom: 30px;">
-                    <h2>${playerName}</h2>
-                    <p>
-                        <strong>Culture Level:</strong> ${playerInfo.cultureLevel || '?'} |
-                        <strong>Steden:</strong> ${playerInfo.playerVillages || playerGroup.length} |
-                        <strong>Vrije slotjes:</strong> ${playerInfo.openSlots ?? '?'}
-                    </p>
-            `;
+        <div class="tm-player-info" style="background:#800000;color:#fff;padding:8px 10px;border-radius:8px;margin:8px 0;">
+          <div style="color:#ffd700;font-size:24px;font-weight:bold;width:100%;margin-bottom:6px;text-align:center;">
+            Speler: ${playerName}
+          </div>
+          <div style="text-align:center;">
+            <div><strong>Culture:</strong> ${pInfo.cultureLevel || "?"} -
+                 <strong>Steden:</strong> ${pInfo.playerVillages || group.length} -
+                 <strong>Open slots:</strong> ${pInfo.openSlots ?? "?"}</div>
+          </div>
+        </div>`;
 
-                playerGroup.forEach((entry, index) => {
-                    const wall = entry.wall || {};
-                    const home = entry.home?.units || {};
-                    const away = entry.away?.units || {};
-                    const support = entry.support?.units || {};
+                group.forEach((entry) => {
+                    const wall     = entry.wall || {};
+                    const home     = entry.home?.units || {};
+                    const away     = entry.away?.units || {};
+                    const support  = entry.support || { supportCombined: {}, supportDetailed: [] };
+                    const allUnits = Object.keys(home).concat(Object.keys(away)).concat(Object.keys(support.supportCombined || {}));
 
-                    html += `
-                    <div style="margin-bottom: 20px; border: 1px solid #ddd; padding: 15px; border-radius: 5px;">
-                        <h3>Stad ${index + 1}: ${wall.town || 'Onbekend'}</h3>
-                        <p>
-                            <strong>Muur:</strong> ${wall.wall || 'N/A'} |
-                            <strong>Toren:</strong> ${wall.tower ? 'Ja' : 'Nee'} |
-                            <strong>Falanx:</strong> ${wall.phalanx ? 'Actief' : 'Inactief'} |
-                            <strong>God:</strong> ${wall.god || 'Onbekend'}
-                        </p>
+                    // islandId rechtstreeks bepalen via cache
+                    let islandId = "";
+                    if (entry.island_x != null && entry.island_y != null) {
+                        islandId = this.getIslandNumber(entry.island_x, entry.island_y) || "";
+                    }
 
-                        ${this.generateTroopCategoryHTML('Aanwezige troepen', home)}
-                        ${this.generateTroopCategoryHTML('Troepen buiten', away)}
-                        ${this.generateTroopCategoryHTML('Ondersteunende troepen', support)}
-                        ${this.generateOtherUnitsHTML(home, away, support)}
-                    </div>
-                `;
+                    const cityName = wall.town || "Onbekend";
+
+                    html += `<div class="tm-town-block"
+                data-player="${playerName}"
+                data-city="${cityName}"
+                data-island="${islandId}"
+                data-units="${allUnits.join(",")}">`;
+
+                    // Stad + eilandnummer tonen
+                    html += `<div style="margin-bottom:6px; color:#00FF00;">
+                        <strong>Stad:</strong> ${cityName}
+                        ${islandId ? `(Eiland ${islandId})` : ""}
+                     </div>`;
+
+                    html += `<div class="tm-small">Muur: ${wall.wall || "N/A"} | Toren: ${wall.tower ? "Ja" : "Nee"} |
+                     Falanx: ${wall.phalanx ? "Actief" : "Inactief"} | God: ${wall.god || "Onbekend"}</div>`;
+
+                    html += this.renderTroopCategory("Aanwezige troepen", home);
+                    html += this.renderTroopCategory("Troepen buiten", away);
+                    html += this.renderSupportSection(support);
+                    html += this.renderOtherUnitsCategory(home, away, support.supportCombined || {});
+
+                    html += `</div>`;
                 });
-
-                html += `</div>`;
             }
 
             return html;
         }
 
-        generateTroopCategoryHTML(title, units) {
-            const landUnits = Object.entries(units).filter(([unit]) => this.isLandUnit(unit));
-            const seaUnits = Object.entries(units).filter(([unit]) => this.isSeaUnit(unit));
+        populateFilters() {
+            const players = new Set();
+            const cities  = new Set();
+            const units   = new Set();
+            const islands = new Set();
 
-            return `
-            <div style="margin-bottom: 15px;">
-                <h4>${title}</h4>
-                ${landUnits.length > 0 ? `
-                    <div style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">
-                        ${landUnits.map(([unit, count]) => `
-                            <div class="unit-icon" style="background-position: ${this.troopIcons[unit] || '0 0'}"
-                                 title="${this.getUnitDescription(unit)}">
-                                <div class="unit-count">${count}</div>
-                            </div>
-                        `).join('')}
-                    </div>
-                ` : '<p>Geen eenheden</p>'}
+            document.querySelectorAll("#gm-panel-troopmanager .tm-town-block").forEach(el => {
+                if (el.dataset.player) players.add(el.dataset.player);
+                if (el.dataset.city)   cities.add(el.dataset.city);
+                if (el.dataset.island) islands.add(el.dataset.island);
 
-                ${seaUnits.length > 0 ? `
-                    <div style="display: flex; flex-wrap: wrap; gap: 5px;">
-                        ${seaUnits.map(([unit, count]) => `
-                            <div class="unit-icon" style="background-position: ${this.troopIcons[unit] || '0 0'}"
-                                 title="${this.getUnitDescription(unit)}">
-                                <div class="unit-count">${count}</div>
-                            </div>
-                        `).join('')}
-                    </div>
-                ` : ''}
-            </div>
-        `;
+                (el.dataset.units || "").split(",").forEach(u => {
+                    if (u) units.add(u);
+                });
+            });
+
+            // speler
+            const selPlayer = document.getElementById("tm-filter-player");
+            selPlayer.innerHTML = `<option value="">Alle</option>`;
+            players.forEach(p => selPlayer.innerHTML += `<option value="${p}">${p}</option>`);
+
+            // stad
+            const selCity = document.getElementById("tm-filter-city");
+            selCity.innerHTML = `<option value="">Alle</option>`;
+            cities.forEach(c => selCity.innerHTML += `<option value="${c}">${c}</option>`);
+
+            // eenheden (NL namen tonen)
+            const selUnit = document.getElementById("tm-filter-unit");
+            selUnit.innerHTML = `<option value="">Alle</option>`;
+            units.forEach(u => {
+                const label = this.unitTranslations[u] || u;
+                selUnit.innerHTML += `<option value="${u}">${label}</option>`;
+            });
+
+            // eilanden (enkel islandId tonen)
+            const selIsland = document.getElementById("tm-filter-island");
+            if (selIsland) {
+                selIsland.innerHTML = `<option value="">Alle</option>`;
+                Array.from(islands).sort((a,b) => Number(a) - Number(b)).forEach(i => {
+                    selIsland.innerHTML += `<option value="${i}">${i}</option>`;
+                });
+            }
+        }
+        // -----------------------------
+        // 1) Robuuste applyFilters()
+        // -----------------------------
+        applyFilters() {
+            const player = document.getElementById("tm-filter-player").value;
+            const city   = document.getElementById("tm-filter-city").value;
+            const unit   = document.getElementById("tm-filter-unit").value;
+            const island = document.getElementById("tm-filter-island")?.value || "";
+
+            document.querySelectorAll("#gm-panel-troopmanager .tm-town-block").forEach(el => {
+                let show = true;
+
+                if (player && el.dataset.player !== player) show = false;
+                if (city && el.dataset.city !== city) show = false;
+                if (unit && !el.dataset.units.split(",").includes(unit)) show = false;
+                if (island && el.dataset.island !== island) show = false;
+
+                el.style.display = show ? "" : "none";
+            });
+        }
+        // -----------------------------
+        // 2) Attach event listeners (zorg dat dit 1x gebeurt NA render/populate)
+        //
+        // Call this after populateFilters() / after you render the panel
+        // -----------------------------
+        attachFilterListeners() {
+            const ids = ["tm-filter-player", "tm-filter-city", "tm-filter-unit", "tm-filter-island"];
+            ids.forEach(id => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                // verwijder eventuele oude listener door clone trick (voorkomt dubbele calls)
+                const newEl = el.cloneNode(true);
+                el.parentNode.replaceChild(newEl, el);
+                newEl.addEventListener("change", () => {
+                    try {
+                        this.applyFilters();
+                    } catch (e) {
+                        console.error("[TroopManager] applyFilters fout:", e);
+                    }
+                });
+            });
         }
 
-        generateOtherUnitsHTML(...unitSets) {
-            const combined = Object.assign({}, ...unitSets);
-            const otherUnits = Object.entries(combined)
-            .filter(([unit]) => !this.isLandUnit(unit) && !this.isSeaUnit(unit))
-            .filter(([_, count]) => count > 0);
-
-            return `
-            <div style="margin-bottom: 15px;">
-                <h4>Andere eenheden</h4>
-                <div style="padding-left: 15px;">
-                    ${otherUnits.length > 0 ?
-                otherUnits.map(([unit, count]) => `
-                            <p>${this.getUnitName(unit)}: ${count}</p>
-                        `).join('') :
-            '<p>Geen andere eenheden</p>'
-        }
-                </div>
-            </div>
-        `;
+        // -----------------------------
+        // 3) Debug helper - run in console if dingen raar blijven
+        // -----------------------------
+        debugShowIslandData() {
+            document.querySelectorAll("#gm-panel-troopmanager .tm-town-block").forEach((b, i) => {
+                if (i < 30) console.log(i, "city:", b.dataset.city, "island:", b.dataset.island, "units:", b.dataset.units);
+            });
+            const sel = document.getElementById("tm-filter-island");
+            if (sel) console.log("Dropdown selected value:", sel.value, "options:", [...sel.options].map(o => o.value).slice(0,30));
+            else console.log("tm-filter-island niet gevonden");
+            console.log("======================================");
         }
 
+
+        fillSelect(id, values) {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            sel.innerHTML = `<option value="">Alle</option>`;
+
+            if (id === "tm-filter-unit") {
+                const arr = [...values].map(v => ({ value: v, label: this.getUnitName(v) }));
+                arr.sort((a, b) => a.label.localeCompare(b.label, "nl")); // sorteer op NL-label
+                arr.forEach(({ value, label }) => {
+                    sel.innerHTML += `<option value="${value}">${label}</option>`;
+                });
+            } else {
+                [...values]
+                    .sort((a, b) => String(a).localeCompare(String(b), "nl"))
+                    .forEach(v => sel.innerHTML += `<option value="${v}">${v}</option>`);
+            }
+        }
+
+        renderSupportSection(support) {
+            return this.renderTroopCategory("Ondersteunende troepen ", support.supportCombined || {});
+        }
         renderTroopCategory(title, units) {
-            const landUnits = Object.entries(units).filter(([unit]) => this.isLandUnit(unit));
-            const seaUnits = Object.entries(units).filter(([unit]) => this.isSeaUnit(unit));
-
-            return `
-            <div class="tm-troop-category">
-                <h4>${title}</h4>
-                ${landUnits.length > 0 ? `
-                    <div class="tm-units-row">
-                        ${landUnits.map(([unit, count]) => this.renderUnitIcon(unit, count)).join('')}
-                    </div>
-                ` : ''}
-                ${seaUnits.length > 0 ? `
-                    <div class="tm-units-row">
-                        ${seaUnits.map(([unit, count]) => this.renderUnitIcon(unit, count)).join('')}
-                    </div>
-                ` : ''}
-            </div>
-        `;
+            const entries = Object.entries(units || {}).filter(([_, v]) => typeof v === "number" && v > 0);
+            if (!entries.length) return "";
+            const land = entries.filter(([u]) => this.isLandUnit(u));
+            const sea = entries.filter(([u]) => this.isSeaUnit(u));
+            let html = `<div style="margin-top:8px;"><strong>${title}</strong>`;
+            html += `<div class="tm-units-grid">`;
+            html += `<div class="tm-units-row">${land.map(([u, c]) => this.renderUnitIcon(u, c)).join("")}</div>`;
+            html += `<div class="tm-units-row">${sea.map(([u, c]) => this.renderUnitIcon(u, c)).join("")}</div>`;
+            html += `</div></div>`;
+            return html;
         }
 
         renderOtherUnitsCategory(...unitSets) {
             const combined = Object.assign({}, ...unitSets);
-            const otherUnits = Object.entries(combined)
-            .filter(([unit]) => !this.isLandUnit(unit) && !this.isSeaUnit(unit))
-            .filter(([_, count]) => count > 0);
-
-            return `
-            <div class="tm-troop-category">
-                <h4>Andere eenheden</h4>
-                <div class="tm-other-list">
-                    ${otherUnits.length > 0 ?
-                otherUnits.map(([unit, count]) => `
-                            <div class="tm-other-line">${this.getUnitName(unit)} – ${count}</div>
-                        `).join('') :
-            '<div class="tm-no-units">Geen eenheden</div>'
-        }
-                </div>
-            </div>
-        `;
+            const otherUnits = Object.entries(combined).filter(
+                ([u, c]) => !this.isLandUnit(u) && !this.isSeaUnit(u) && c > 0
+            );
+            if (!otherUnits.length) return "";
+            return `<div style="margin-top:6px;"><strong>Andere eenheden</strong><div style=\"padding-left:8px;\">${otherUnits
+                .map(([u, c]) => `<div>${this.getUnitName(u)}: ${c}</div>`)
+                .join("")}</div></div>`;
         }
 
         renderUnitIcon(unit, count) {
-            return `
-            <div class="tm-unit" style="${this.getUnitIconStyle(unit)}" title="${this.getUnitDescription(unit)}">
-                <div class="tm-unit-count">${count}</div>
-            </div>
-        `;
+            const pos = this.troopIcons[unit] || "0 0";
+            const style = [
+                `background-image: url(${this.CONFIG.TROOP_ICONS_URL})`,
+                `background-position: ${pos}`,
+                `background-repeat: no-repeat`,
+                `width:40px`,
+                `height:40px`,
+                `display:block`,
+            ].join("; ");
+            return `<div class="tm-unit" title="${this.getUnitDescription(unit)}" style="${style}"><div class="tm-unit-count">${count}</div></div>`;
         }
 
-        getUnitDescription(unit) {
-            return this.unitTranslations[unit] || 'Geen beschrijving beschikbaar';
-        }
+        // ============ //
+        //  Data utils  //
+        // ============ //
+        groupDataByPlayer(data) {
+            const grouped = {};
+            const n = (data.IDs || []).length;
+            for (let i = 0; i < n; i++) {
+                const player =
+                      data.HomeTroops?.[i]?.playerName || data.PlayerCL?.[0]?.playerName || "Unknown";
+                if (!grouped[player]) grouped[player] = [];
 
-        getUnitName(unitKey) {
-            return this.unitTranslations[unitKey] || unitKey;
-        }
+                const supportEntry = data.SupportInCity?.[i] || {};
+                const idEntry = data.IDs?.[i] || {};
+                const townId = idEntry.id != null ? Number(idEntry.id) : null;
 
-        // Export system
-        exportToExcel() {
-            if (!this.currentData) {
-                this.manager.showNotification('No data available to export', false);
-                return;
-            }
-
-            try {
-                const csvContent = this.formatCSVData(this.currentData);
-                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-                const link = document.createElement('a');
-                link.href = URL.createObjectURL(blob);
-                link.download = `troop_export_${new Date().toISOString().slice(0,10)}.csv`;
-                link.click();
-                this.manager.showNotification('Export started successfully!');
-            } catch (error) {
-                console.error('Export error:', error);
-                this.manager.showNotification(`Export failed: ${error.message}`, false);
-            }
-        }
-
-        formatCSVData(data) {
-            let csv = 'Player,Culture Level,Villages,Open Slots,Town,Wall,Tower,Phalanx,God,Unit Type,Unit,Count\n';
-
-            data.PlayerCL.forEach(player => {
-                data.Wall.forEach((wall, index) => {
-                    const troops = data.Troepen[index] || { units: {} };
-                    Object.entries(troops.units).forEach(([unit, count]) => {
-                        csv += [
-                            `"${player.playerName}"`,
-                            player.cultureLevel,
-                            player.playerVillages,
-                            player.openSlots,
-                            `"${wall?.town || 'Unknown'}"`,
-                            wall?.wall || 'N/A',
-                            wall?.tower ? 'Yes' : 'No',
-                            wall?.phalanx ? 'Yes' : 'No',
-                            `"${wall?.god || ''}"`,
-                            this.isLandUnit(unit) ? 'Land' : (this.isSeaUnit(unit) ? 'Sea' : 'Other'),
-                            `"${unit}"`,
-                            count
-                        ].join(',') + '\n';
+                // Probeer island coords te vinden in data.Troepen (meest betrouwbare bron)
+                let island_x = null;
+                let island_y = null;
+                if (Array.isArray(data.Troepen) && townId != null) {
+                    const found = data.Troepen.find(t => {
+                        // sommige records hebben home_town_id/current_town_id als strings / numbers
+                        const hid = t.home_town_id != null ? Number(t.home_town_id) : null;
+                        const cid = t.current_town_id != null ? Number(t.current_town_id) : null;
+                        return (hid !== null && hid === townId) || (cid !== null && cid === townId);
                     });
-                });
-            });
-
-            return csv;
-        }
-
-        async performUpload() {
-            try {
-                const playerName = this.getPlayerName();
-                await this.deleteOldDataFromSupabase(playerName);
-                await this.uploadDataToSupabase(troopData, playerName);
-                this.manager.showNotification('Upload gelukt');
-            } catch (error) {
-                this.manager.showNotification(`Upload faalde: ${error.message}`, false);
-            }
-        }
-
-        async deleteOldDataFromSupabase(playerName) {
-            try {
-                const url = `${this.CONFIG.SUPABASE_URL}/rest/v1/troepen?player=eq.${encodeURIComponent(playerName)}`;
-                const response = await fetch(url, {
-                    method: 'DELETE',
-                    headers: {
-                        'apikey': this.CONFIG.SUPABASE_API_KEY,
-                        'Authorization': `Bearer ${this.CONFIG.SUPABASE_API_KEY}`,
-                        'Content-Type': 'application/json',
-                        'Prefer': 'return=minimal' // sneller
+                    if (found) {
+                        island_x = found.island_x ?? found.x ?? null;
+                        island_y = found.island_y ?? found.y ?? null;
                     }
-                });
-
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error(`Supabase DELETE failed: ${errorText}`);
                 }
 
-                console.log(`[SUPABASE] Oude data verwijderd voor speler: ${playerName}`);
-            } catch (error) {
-                console.error('Fout bij verwijderen van oude data:', error);
+                grouped[player].push({
+                    wall: data.Wall?.[i] || {},
+                    home: data.HomeTroops?.[i] || { units: {} },
+                    away: data.AwayTroops?.[i] || { units: {} },
+                    support: {
+                        supportCombined: supportEntry.supportCombined || supportEntry.units || {},
+                        supportDetailed: Array.isArray(supportEntry.supportDetailed) ? supportEntry.supportDetailed : []
+                    },
+                    // toegevoegde velden zodat generateTroopDataHTML ze kan tonen / dataset kan vullen
+                    island_x,
+                    island_y
+                });
+            }
+            return grouped;
+        }
+        getUnitDescription(unit) {
+            return this.unitTranslations[unit] || unit;
+        }
+        getUnitName(unit) {
+            return this.unitTranslations[unit] || unit;
+        }
+        isLandUnit(unit) {
+            const land = [
+                "sword",
+                "slinger",
+                "archer",
+                "hoplite",
+                "rider",
+                "chariot",
+                "catapult",
+                "minotaur",
+                "manticore",
+                "zyklop",
+                "harpy",
+                "medusa",
+                "centaur",
+                "pegasus",
+                "cerberus",
+                "fury",
+                "griffin",
+                "calydonian_boar",
+                "satyr",
+                "spartoi",
+                "ladon",
+                "godsent",
+                "militia",
+            ];
+            return land.includes(unit);
+        }
+        isSeaUnit(unit) {
+            const sea = [
+                "big_transporter",
+                "bireme",
+                "attack_ship",
+                "demolition_ship",
+                "small_transporter",
+                "trireme",
+                "colonize_ship",
+                "sea_monster",
+                "siren",
+            ];
+            return sea.includes(unit);
+        }
+
+        normalizeUnits(units) {
+            const add = (target, obj) => {
+                if (!obj || typeof obj !== "object") return;
+                const leaf = obj.units && typeof obj.units === "object" ? obj.units : obj;
+                for (const [u, c] of Object.entries(leaf)) {
+                    if (typeof c === "number" && c > 0) target[u] = (target[u] || 0) + c;
+                }
+            };
+            const flat = {};
+            if (!units) return flat;
+            if (Array.isArray(units)) {
+                units.forEach((x) => add(flat, x));
+                return flat;
+            }
+            const values = Object.values(units);
+            const looksFlat = values.every((v) => typeof v === "number");
+            if (looksFlat) return { ...units };
+            values.forEach((v) => add(flat, v));
+            return flat;
+        }
+
+        // ============== //
+        //   Export CSV   //
+        // ============== //
+        exportAllData() {
+            this.fetchAllPlayersData()
+                .then((all) => {
+                if (!all.length) return this.manager?.showNotification?.("Geen data om te exporteren", false);
+                let csv = "Speler,Culture Level,Steden,Stad,Muur,Toren,Falanx,God,Unit Type,Unit,Count\n";
+                all.forEach((row) => {
+                    (row.data?.PlayerCL || []).forEach((player) => {
+                        (row.data?.Wall || []).forEach((wall, idx) => {
+                            const troops = (row.data?.Troepen && row.data.Troepen[idx]) || { units: {} };
+                            Object.entries(troops.units || {}).forEach(([unit, count]) => {
+                                csv += [
+                                    `"${player.playerName}"`,
+                                    player.cultureLevel,
+                                    player.playerVillages,
+                                    `"${wall?.town || "Unknown"}"`,
+                                    wall?.wall || "N/A",
+                                    wall?.tower ? "Yes" : "No",
+                                    wall?.phalanx ? "Yes" : "No",
+                                    `"${wall?.god || ""}"`,
+                                    this.isLandUnit(unit) ? "Land" : this.isSeaUnit(unit) ? "Sea" : "Other",
+                                    `"${unit}"`,
+                                    count,
+                                ].join(",") + "\n";
+                            });
+                        });
+                    });
+                });
+                const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(blob);
+                link.download = `troop_export_${new Date().toISOString().slice(0, 10)}.csv`;
+                link.click();
+                this.manager?.showNotification?.("Export gestart");
+            })
+                .catch((e) => {
+                console.error("exportAllData error", e);
+                this.manager?.showNotification?.("Export mislukt", false);
+            });
+        }
+
+        // =============================== //
+        //  Local troepen ophalen (client) //
+        // =============================== //
+        async fetchTroopData() {
+            const playerName = this.uw?.Game?.player_name || "onbekend";
+            const data = {
+                PlayerCL: [],
+                HomeTroops: [],
+                AwayTroops: [],
+                SupportInCity: [],
+                Wall: [],
+                IDs: [],
+                Troepen: [],
+                timestamp: new Date().toISOString(),
+                alliance: this.uw?.Game?.alliance_name || "Geen alliantie",
+            };
+
+            try {
+                // 1) PlayerCL (culture + open slots) - best effort
+                try {
+                    const cldata = (this.uw?.TooltipFactory?.getCultureOverviewTooltip?.() || "").split?.("<br />") || [];
+                    const cl = parseInt(cldata[1]?.replace(/<b>.*?<\/b>/g, "").trim()) || (this.uw?.Game?.culture_level || 0);
+                    const open_slots = Math.max(0, cl - (this.uw?.Game?.player_villages || 0));
+                    data.PlayerCL.push({
+                        playerName,
+                        playerVillages: this.uw?.Game?.player_villages || 0,
+                        cultureLevel: cl,
+                        openSlots: open_slots,
+                    });
+                } catch (e) {
+                    data.PlayerCL.push({ playerName, playerVillages: this.uw?.Game?.player_villages || 0, cultureLevel: 0, openSlots: 0 });
+                }
+
+                // 2) IDs + Wall (stedenlijst)
+                const townsObj = this.uw?.ITowns?.towns || {};
+                for (const tid in townsObj) {
+                    const town = townsObj[tid];
+                    if (!town) continue;
+                    // push ID entry (orde van IDs bepaalt de volgorde bij UI)
+                    data.IDs.push({ town: town.name, id: town.id });
+
+                    // Wall / info best-effort
+                    const townObj = this.uw?.ITowns?.getTown?.(town.id) || town;
+                    data.Wall.push({
+                        player: playerName,
+                        town: town.name,
+                        wall: townObj?.getBuildings?.()?.attributes?.wall || townObj?.getBuildings?.()?.get?.("wall") || 0,
+                        phalanx: townObj?.getResearches?.()?.get?.("phalanx") || false,
+                        tower: townObj?.getBuildings?.()?.get?.("tower") || false,
+                        god: (typeof townObj?.god === "function") ? townObj?.god() : (townObj?.god || "Unknown"),
+                    });
+                }
+
+                // 3) Bouw data.Troepen uit de unit-fragmenten (bron van waarheid)
+                // fragments path - veel clients hebben ITowns.all_units.fragments
+                const fragments = this.uw?.ITowns?.all_units?.fragments || {};
+                const knownUnitKeys = new Set(Object.keys(this.unitTranslations || {}));
+                knownUnitKeys.add("militia"); knownUnitKeys.add("militia_bow"); knownUnitKeys.add("militia_spear");
+
+                for (const fragId in fragments) {
+                    try {
+                        const fragment = fragments[fragId];
+                        if (!fragment || !fragment.models) continue;
+
+                        for (const modelId in fragment.models) {
+                            const model = fragment.models[modelId];
+                            if (!model) continue;
+                            const attrs = model.attributes || {};
+                            // units can be either top-level numeric keys or nested in attrs.units
+                            const units = {};
+                            if (attrs.units && typeof attrs.units === "object") {
+                                for (const [k, v] of Object.entries(attrs.units)) {
+                                    if (knownUnitKeys.has(k) && typeof v === "number" && v > 0) units[k] = (units[k] || 0) + v;
+                                }
+                            }
+                            // also check top-level numeric unit keys
+                            for (const [k, v] of Object.entries(attrs)) {
+                                if (k === "units") continue;
+                                if (knownUnitKeys.has(k) && typeof v === "number" && v > 0) units[k] = (units[k] || 0) + v;
+                            }
+
+                            // metadata extraction (behoedzaam: meerdere veldnamen voorkomen in verschillende versies)
+                            const metaHome = attrs.home_town_id ?? attrs.homeTownId ?? attrs.homeId ?? (attrs.units && attrs.units.home_town_id) ?? null;
+                            const metaCurrent = attrs.current_town_id ?? attrs.currentTownId ?? attrs.currentId ?? (attrs.units && attrs.units.current_town_id) ?? null;
+                            const metaCurrentPlayer = attrs.current_town_player_id ?? attrs.currentTownPlayerId ?? null;
+                            const metaId = attrs.id ?? null;
+                            const island_x = attrs.island_x ?? null;
+                            const island_y = attrs.island_y ?? null;
+
+                            // Only keep fragments that actually contain unit counts or relevant meta
+                            if (Object.keys(units).length > 0 || metaHome || metaCurrent) {
+                                data.Troepen.push({
+                                    player: playerName,
+                                    id: metaId,
+                                    home_town_id: metaHome,
+                                    current_town_id: metaCurrent,
+                                    current_town_player_id: metaCurrentPlayer,
+                                    island_x,
+                                    island_y,
+                                    units,
+                                });
+                            }
+                        }
+                    } catch (e) {
+                        // frag parse failed — negeren en doorgaan
+                        console.warn("[TroopManager] fragment parse error", fragId, e);
+                    }
+                }
+
+                // 4) RECONSTRUCT: gebruik ALLE data.Troepen als bron van waarheid
+                const byHome = {};    // grouped by home_town_id => away troops for that home town
+                const byCurrent = {}; // grouped by current_town_id => supports present in that town
+                const homeInTown = {}; // aggregated troops that are at home (home==current)
+
+                for (const frag of data.Troepen) {
+                    if (!frag) continue;
+                    const hid = frag.home_town_id != null ? Number(frag.home_town_id) : null;
+                    const cid = frag.current_town_id != null ? Number(frag.current_town_id) : null;
+                    const units = frag.units || {};
+
+                    if (hid && cid && hid === cid) {
+                        // truly at home
+                        homeInTown[hid] = homeInTown[hid] || {};
+                        for (const [u, c] of Object.entries(units)) {
+                            if (!Number(c)) continue;
+                            homeInTown[hid][u] = (homeInTown[hid][u] || 0) + Number(c);
+                        }
+                    } else {
+                        // away from home (belongs to a home)
+                        if (hid) {
+                            byHome[hid] = byHome[hid] || {};
+                            for (const [u, c] of Object.entries(units)) {
+                                if (!Number(c)) continue;
+                                byHome[hid][u] = (byHome[hid][u] || 0) + Number(c);
+                            }
+                        }
+                        // present in a town (support arriving or other players' troops)
+                        if (cid) {
+                            byCurrent[cid] = byCurrent[cid] || {};
+                            for (const [u, c] of Object.entries(units)) {
+                                if (!Number(c)) continue;
+                                byCurrent[cid][u] = (byCurrent[cid][u] || 0) + Number(c);
+                            }
+                        }
+                    }
+                }
+
+                /* Eerst: zorg dat je lookups geladen zijn (aanroep vóór het opbouwen van supportDetailsMap) */
+                await this.loadWorldLookupCaches(); // laad towns & players (caching)
+
+                /* Simpele supporttelling: totaal aantal eenheden per stad */
+                const supportTotals = {}; // townId -> {unit: count}
+
+                for (const frag of data.Troepen) {
+                    if (!frag) continue;
+                    const hid = frag.home_town_id != null ? Number(frag.home_town_id) : null;
+                    const cid = frag.current_town_id != null ? Number(frag.current_town_id) : null;
+                    if (!cid) continue;
+
+                    // alleen supports van andere stad
+                    if (hid && hid !== cid) {
+                        supportTotals[cid] = supportTotals[cid] || {};
+                        for (const [u, c] of Object.entries(frag.units || {})) {
+                            if (!Number(c)) continue;
+                            supportTotals[cid][u] = (supportTotals[cid][u] || 0) + Number(c);
+                        }
+                    }
+                }
+
+                // 5) Build final arrays (order matches data.IDs)
+                for (const idEntry of data.IDs) {
+                    const tid = Number(idEntry.id);
+                    const townName = idEntry.town;
+
+                    data.HomeTroops.push({
+                        playerName,
+                        townName,
+                        units: homeInTown[tid] || {},
+                    });
+
+                    data.AwayTroops.push({
+                        playerName,
+                        townName,
+                        units: byHome[tid] || {},
+                    });
+
+                    data.SupportInCity.push({
+                        playerName,
+                        townName,
+                        supportCombined: byCurrent[tid] || {},
+                        supportDetailed: supportTotals[tid] || {}, // nu enkel totaal
+                    });
+
+                }
+
+                // cache and return
+                this.cachedTroepen = data.Troepen || [];
+                return data;
+
+            } catch (err) {
+                console.error("[TroopManager] fetchTroopData error", err);
+                throw err;
             }
         }
 
 
-        // Voeg deze nieuwe methodes toe:
+        async fetchSupportViaAjax(townId) {
+            const $ = this.uw.$;
+            const h = this.uw.Game?.csrfToken || this.uw.Game?.csrf_token || "";
+            const url = `/game/town_info?town_id=${encodeURIComponent(townId)}&action=support&h=${encodeURIComponent(h)}`;
 
+            return new Promise((resolve) => {
+                if (!$) return resolve({ combined: {}, detailed: [] });
+
+                $.get(url, (resp) => {
+                    try {
+                        const html = resp && resp.html ? resp.html : resp;
+                        const doc = new this.uw.DOMParser().parseFromString(html, "text/html");
+
+                        const sumUnitsInto = (target, el) => {
+                            el.querySelectorAll('[class*="unit_"]').forEach((uEl) => {
+                                const m = uEl.className.match(/unit_([a-z_]+)/);
+                                if (!m) return;
+                                const type = m[1];
+                                const n = parseInt(uEl.textContent.replace(/[^\d]/g, ''), 10) || 0;
+                                if (n > 0) target[type] = (target[type] || 0) + n;
+                            });
+                        };
+
+                        // Totaal: tel alle unit_... in het document op
+                        const combined = {};
+                        sumUnitsInto(combined, doc);
+
+                        // Detail: probeer per supporter te splitsen
+                        const detailed = [];
+                        const pushDetail = (container) => {
+                            const units = {};
+                            sumUnitsInto(units, container);
+                            if (!Object.keys(units).length) return;
+
+                            const links = Array.from(container.querySelectorAll('a'));
+                            let supporterTown = "";
+                            let supporterName = "";
+
+                            if (links.length) {
+                                const townLink = links.find(a => /town|info|polis|city/i.test(a.getAttribute('href') || "")) || links[0];
+                                supporterTown = (townLink && townLink.textContent.trim()) || "";
+                                const playerLink = links.find(a => /player|profile/i.test(a.getAttribute('href') || "")) || links[1];
+                                supporterName = (playerLink && playerLink.textContent.trim()) || "";
+                            }
+                            if (!supporterTown || !supporterName) {
+                                const txt = (container.textContent || "").replace(/\s+/g, " ").trim();
+                                const m = txt.match(/(.+?)\s*\((.+?)\)/); // "Town (Player)"
+                                if (m) {
+                                    supporterTown = supporterTown || m[1].trim();
+                                    supporterName = supporterName || m[2].trim();
+                                }
+                            }
+                            detailed.push({ supporterName, supporterTown, units });
+                        };
+
+                        // Eerst rows in tabellen
+                        const rowCandidates = Array.from(doc.querySelectorAll("tr"))
+                        .filter(tr => tr.querySelector('[class*="unit_"]'));
+                        if (rowCandidates.length) {
+                            rowCandidates.forEach(pushDetail);
+                        } else {
+                            // fallback: lijst/blokken
+                            const blocks = Array.from(doc.querySelectorAll(".supporter, .support, .supporter_row, .row, li"))
+                            .filter(b => b.querySelector && b.querySelector('[class*="unit_"]'));
+                            blocks.forEach(pushDetail);
+                        }
+
+                        resolve({ combined, detailed });
+                    } catch (e) {
+                        resolve({ combined: {}, detailed: [] });
+                    }
+                }).fail(() => resolve({ combined: {}, detailed: [] }));
+            });
+        }
+
+        async hydrateSupportForAllTowns(data, playerName) {
+            const towns = this.uw.ITowns?.towns || {};
+            const result = [];
+            const unitKeys = new Set(Object.keys(this.unitTranslations || {}));
+            unitKeys.add('militia'); unitKeys.add('militia_bow'); unitKeys.add('militia_spear');
+
+            for (const townId in towns) {
+                const town = towns[townId];
+                try {
+                    let supportCombined = {};
+                    let supportDetailed = [];
+
+                    // 1) native API
+                    try {
+                        const native = typeof town.unitsSupport === "function" ? town.unitsSupport() : (town.unitsSupport || {});
+                        if (native && Object.keys(native).length) {
+                            for (const k in native) {
+                                if (unitKeys.has(k) && typeof native[k] === 'number' && native[k] > 0) {
+                                    supportCombined[k] = native[k];
+                                }
+                            }
+                        }
+                    } catch (err) { /* negeren */ }
+
+                    // 2) Ajax scrape
+                    if (!Object.keys(supportCombined).length) {
+                        const viaAjax = await this.fetchSupportViaAjax(townId);
+                        supportCombined = {};
+                        for (const k in (viaAjax.combined || {})) {
+                            if (unitKeys.has(k) && typeof viaAjax.combined[k] === 'number' && viaAjax.combined[k] > 0) {
+                                supportCombined[k] = viaAjax.combined[k];
+                            }
+                        }
+                        supportDetailed = viaAjax.detailed || [];
+                    }
+
+                    // 3) Fallback uit data.Troepen
+                    if (!Object.keys(supportCombined).length && Array.isArray(data?.Troepen)) {
+                        const supports = {};
+                        const detailedFromTroepen = [];
+                        const tid = Number(town.id);
+
+                        for (const t of data.Troepen) {
+                            if (!t) continue;
+                            if (Number(t.current_town_id) === tid && (t.home_town_id == null || Number(t.home_town_id) !== tid)) {
+                                for (const [u, c] of Object.entries(t.units || {})) {
+                                    if (!unitKeys.has(u)) continue;
+                                    supports[u] = (supports[u] || 0) + (Number(c) || 0);
+                                }
+                                const homeTownInfo = t.home_town_id ? this.getTownInfoById(t.home_town_id) : { name: "", player_id: null };
+                                detailedFromTroepen.push({
+                                    supporterTownId: t.home_town_id || null,
+                                    supporterTown: homeTownInfo.name || this.uw.ITowns.getTown?.(t.home_town_id)?.name || "",
+                                    supporterPlayerId: homeTownInfo.player_id || null,
+                                    supporterName: homeTownInfo?.player_id ? this.getPlayerNameById(homeTownInfo.player_id) : "",
+                                    units: t.units || {},
+                                    id: t.id || null,
+                                });
+                            }
+                        }
+                        if (Object.keys(supports).length) {
+                            supportCombined = supports;
+                            supportDetailed = detailedFromTroepen;
+                        }
+                    }
+
+                    result.push({ playerName, townName: town.name, supportCombined, supportDetailed });
+                    await this.sleep(200);
+
+                } catch (e) {
+                    console.error(`[TroopManager] Fout bij support voor stad ${townId}`, e);
+                    result.push({ playerName, townName: town?.name || "", supportCombined: {}, supportDetailed: [] });
+                }
+            }
+
+            data.SupportInCity = result;
+            this.cachedTroepen = data.Troepen || [];
+            return result;
+        }
+
+        // ================= //
+        //  Upload/Autosync  //
+        // ================= //
         startAutoUploader() {
-            this.autoUploader = setInterval(() => {
-                this.uploadTroopData().catch(e => console.warn("Upload mislukt:", e));
-            }, this.CONFIG.UPLOAD_INTERVAL);
-
-            // Upload bij start ook meteen
-            this.uploadTroopData().catch(e => console.warn("Initiële upload mislukt:", e));
+            if (this.autoUploader) clearInterval(this.autoUploader);
+            this.autoUploader = setInterval(() => this.uploadTroopData().catch(() => {}), this.CONFIG.UPLOAD_INTERVAL);
+            // initiële upload direct
+            this.uploadTroopData().catch(() => {});
         }
 
         async uploadTroopData() {
             try {
-                const data = await this.fetchTroopData(); // deze moet ook bestaan
-                const playerName = this.uw.Game.player_name || "Onbekend";
+                const data = await this.fetchTroopData();
+                const playerName = this.uw.Game?.player_name || "Onbekend";
                 await this.uploadDataToSupabase(data, playerName);
-                console.log('[TroopManager] Troepen automatisch geüpload naar Supabase');
+                console.log("[TroopManager] Troepen geüpload naar Supabase");
             } catch (e) {
-                console.error('[TroopManager] Automatische upload mislukt:', e);
+                console.error("[TroopManager] Upload mislukt:", e);
+                this.manager?.showNotification?.("Upload mislukt", false);
             }
-        }
-
-        setupAutoUpload() {
-            function calculateNextUpload() {
-                const now = new Date();
-                const nextUpload = new Date(now);
-                nextUpload.setMinutes(Math.ceil(now.getMinutes() / 5) * 5);
-                nextUpload.setSeconds(0);
-                nextUpload.setMilliseconds(0);
-                return nextUpload - now;
-            }
-
-            const performUpload = async () => {
-                try {
-                    const playerName = this.getPlayerName();
-                    const troopData = await this.fetchTroopData();
-                    await this.uploadDataToSupabase(troopData, playerName);
-                    this.manager.showNotification('Auto-upload successful!');
-                } catch (error) {
-                    console.error('Auto-upload error:', error);
-                    this.manager.showNotification(`Upload failed: ${error.message}`, false);
-                }
-            };
-
-            setTimeout(() => {
-                performUpload();
-                setInterval(performUpload, this.CONFIG.UPLOAD_INTERVAL);
-            }, calculateNextUpload());
         }
 
         async uploadDataToSupabase(data, playerName) {
             try {
+                const { url, key } = await this.getSupabaseConfig();
+                if (!url || !key) {
+                    this.manager?.showNotification?.(
+                        "Supabase niet ingesteld. Vul Instellingen → Supabase in.",
+                        false
+                    );
+                    console.warn("[TroopManager] Supabase niet geconfigureerd");
+                    return;
+                }
+                const endpoint = `${url.replace(/\/$/, "")}/rest/v1/troepen?on_conflict=player,world`;
+                const headers = {
+                    apikey: key,
+                    Authorization: `Bearer ${key}`,
+                    "Content-Type": "application/json",
+                    Prefer: "resolution=merge-duplicates,return=representation",
+                };
+
+                // BELANGRIJK: alles in de kolom 'data' stoppen (één JSON‑object) zodat uitlezen consistent is
                 const payload = {
                     player: playerName,
                     world: this.world,
-                    data: data
+                    data: {
+                        HomeTroops: data.HomeTroops || [],
+                        AwayTroops: data.AwayTroops || [],
+                        SupportInCity: data.SupportInCity || [],
+                        Wall: data.Wall || [],
+                        PlayerCL: data.PlayerCL || [],
+                        IDs: data.IDs || [],
+                        Troepen: data.Troepen || [],
+                        timestamp: data.timestamp || new Date().toISOString(),
+                        alliance: data.alliance || (this.uw.Game?.alliance_name || "Geen alliantie"),
+                    },
+                    timestamp: data.timestamp || new Date().toISOString(), // optioneel, top‑level
                 };
 
-                const url = `${this.CONFIG.SUPABASE_URL}/rest/v1/troepen?on_conflict=player,world`;
-                const headers = {
-                    'apikey': this.CONFIG.SUPABASE_API_KEY,
-                    'Authorization': `Bearer ${this.CONFIG.SUPABASE_API_KEY}`,
-                    'Content-Type': 'application/json',
-                    'Prefer': 'resolution=merge-duplicates,return=representation'
-                };
-
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: headers,
-                    body: JSON.stringify([payload])
-                });
-
-                if (!response.ok) throw new Error(`Upsert mislukt`);
-            } catch (error) {}
-        }
-
-        // Data handling functions
-        async fetchTroopData() {
-            const playerName = this.uw.Game.player_name || "onbekend";
-            const data = {
-                HomeTroops: [],
-                AwayTroops: [],
-                SupportInCity: [],
-                PlayerCL: [],
-                Wall: [],
-                IDs: [],
-                Troepen: [],
-                timestamp: new Date().toISOString()
-            };
-
-            try {
-                // Get culture level
-                const cldata = this.uw.TooltipFactory.getCultureOverviewTooltip()?.split('<br />') || [];
-                const cl = parseInt(cldata[1]?.replace(/<b>.*?<\/b>/g, '').trim()) || 0;
-                const open_slots = cl - (this.uw.Game.player_villages || 0);
-
-                data.PlayerCL.push({
-                    playerName: playerName,
-                    playerVillages: this.uw.Game.player_villages || 0,
-                    cultureLevel: cl,
-                    openSlots: open_slots
-                });
-
-                // Get towns data
-                const towns = this.uw.ITowns?.towns || {};
-                for (const townId in towns) {
-                    const town = towns[townId];
-                    if (!town) continue;
-
-                    data.HomeTroops.push({
-                        playerName: playerName,
-                        townName: town.name,
-                        units: town.units?.() || {}
-                    });
-
-                    data.AwayTroops.push({
-                        playerName: playerName,
-                        townName: town.name,
-                        units: town.unitsOuter?.() || {}
-                    });
-
-                    data.SupportInCity.push({
-                        playerName: playerName,
-                        townName: town.name,
-                        units: town.unitsSupport?.() || {}
-                    });
-
-                    data.IDs.push({
-                        town: town.name,
-                        id: town.id
-                    });
-
-                    const townObj = this.uw.ITowns.getTown?.(town.id);
-                    data.Wall.push({
-                        player: playerName,
-                        town: town.name,
-                        wall: townObj?.getBuildings?.()?.attributes?.wall || 0,
-                        phalanx: townObj?.getResearches?.()?.get?.("phalanx") || false,
-                        tower: townObj?.getBuildings?.()?.get?.("tower") || false,
-                        god: townObj?.god?.() || 'Unknown'
-                    });
+                const resp = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(payload) });
+                const text = await resp.text();
+                if (!resp.ok) {
+                    console.error("[TroopManager] Supabase upload failed", resp.status, text);
+                    this.manager?.showNotification?.("Upload mislukt (bekijk console)", false);
+                    return;
                 }
-
-                // Get all units
-                const allUnits = this.uw.ITowns?.all_units?.fragments || {};
-                for (const fragmentId in allUnits) {
-                    const fragment = allUnits[fragmentId];
-                    if (!fragment?.models) continue;
-
-                    for (const modelId in fragment.models) {
-                        const model = fragment.models[modelId];
-                        const units = model?.attributes || {};
-
-                        const filteredUnits = {};
-                        for (const unit in units) {
-                            if (typeof units[unit] === "number" && units[unit] > 0) {
-                                filteredUnits[unit] = units[unit];
-                            }
-                        }
-
-                        if (Object.keys(filteredUnits).length > 0) {
-                            data.Troepen.push({
-                                player: playerName,
-                                units: filteredUnits
-                            });
-                        }
-                    }
-                }
-            } catch (error) {
-                console.error('Error fetching troop data:', error);
-                throw error;
-            }
-
-            return data;
-        }
-
-        groupDataByPlayer(data) {
-            const grouped = {};
-
-            // Controleer of data.IDs bestaat en is een array
-            const ids = data.IDs || [];
-            const troops = data.Troepen || [];
-            const walls = data.Wall || [];
-            const homeTroops = data.HomeTroops || [];
-            const awayTroops = data.AwayTroops || [];
-            const supportTroops = data.SupportInCity || [];
-
-            for (let i = 0; i < ids.length; i++) {
-                const player = troops[i]?.player || 'Unknown';
-
-                if (!grouped[player]) {
-                    grouped[player] = [];
-                }
-
-                grouped[player].push({
-                    wall: walls[i] || {},
-                    home: homeTroops[i] || { units: {} },
-                    away: awayTroops[i] || { units: {} },
-                    support: supportTroops[i] || { units: {} }
-                });
-            }
-
-            return grouped;
-        }
-
-        // Helper functions
-        getPlayerName() {
-            if (!this.uw.Game?.player_name) {
-                throw new Error("Could not get player name");
-            }
-            return this.uw.Game.player_name.startsWith('.') ?
-                this.uw.Game.player_name.substring(1) :
-            this.uw.Game.player_name;
-        }
-
-        setupStyles() {
-            // Wait for the DOM to be fully loaded
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', () => this.injectStyles());
-            } else {
-                this.injectStyles();
+                this.manager?.showNotification?.("Troepen succesvol geüpload", true);
+            } catch (err) {
+                console.error("uploadDataToSupabase error", err);
+                this.manager?.showNotification?.("Upload naar Supabase mislukt", false);
             }
         }
-
-        injectStyles() {
-            const styleElement = document.createElement('style');
-            styleElement.textContent = `
-            .tm-grid {
-                display: grid;
-                gap: 20px;
-                padding: 15px;
-            }
-
-            .tm-troops-col {
-                width: 520px;
-                flex-shrink: 0;
-            }
-
-            .tm-player-card,
-            .tm-city-section,
-            .tm-troop-section {
-                width: 520px;
-                min-height: 110px;
-                background: #1dcae0;
-                padding: 15px;
-                border-radius: 8px;
-                margin-bottom: 15px;
-            }
-
-            .tm-unit {
-                font: 700 12px Verdana, Arial, Helvetica, sans-serif;
-                user-select: none;
-                vertical-align: middle;
-                width: 39px;
-                height: 40px;
-                position: relative;
-                display: inline-block;
-                text-align: right;
-                margin: 1px;
-                text-shadow: 1px 1px 0 #000;
-                cursor: pointer;
-                box-shadow: inset 0 0 4px #000;
-                background-image: url(${this.CONFIG.TROOP_ICONS_URL});
-            }
-
-            .tm-unit:hover {
-                transform: scale(1.1);
-                z-index: 100;
-            }
-
-            .tm-unit-count {
-                position: absolute;
-                bottom: 2px;
-                right: 2px;
-                padding: 2px 5px;
-                border-radius: 3px;
-                font-size: 11px;
-                background-color: rgba(0,0,0,0.5);
-                color: white;
-            }
-
-            .tm-units-row {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 5px;
-                padding: 5px 0;
-            }
-
-            .tm-filters {
-                display: flex;
-                gap: 10px;
-                padding: 15px;
-                background: #1dcae0;
-                border-radius: 8px;
-                margin-bottom: 20px;
-            }
-
-            .tm-btn {
-                padding: 10px 20px;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                transition: all 0.3s;
-                font-weight: bold;
-                color: white;
-            }
-
-            .tm-btn:hover {
-                opacity: 0.9;
-            }
-
-            .tm-download {
-                background: #17d117;
-            }
-
-            .tm-export {
-                background: #cf1717;
-            }
-
-            .tm-close {
-                background: #db1a1a;
-            }
-
-            .tm-close-btn {
-                position: absolute;
-                top: 10px;
-                right: 15px;
-                font-size: 24px;
-                cursor: pointer;
-                color: #ffd700;
-            }
-
-            .tm-close-btn:hover {
-                color: #ff0000;
-            }
-
-            .tm-troop-category {
-                margin-bottom: 15px;
-                padding-bottom: 10px;
-                border-bottom: 1px solid #fc6;
-            }
-
-            .tm-troop-category h4 {
-                margin: 0 0 10px 0;
-                color: #ffd700;
-            }
-
-            .tm-other-list {
-                padding: 5px 0 0 10px;
-            }
-
-            .tm-other-line {
-                font-family: Verdana, sans-serif;
-                font-size: 13px;
-                line-height: 1.5;
-                color: #ffd700;
-                margin-bottom: 5px;
-            }
-
-            .tm-no-units {
-                font-style: italic;
-                color: #aaa;
-            }
-
-            .tm-single-column {
-                display: flex;
-                flex-direction: column;
-                gap: 20px;
-                font-family: Verdana, sans-serif;
-                font-size: 13px;
-                color: #ffd700;
-            }
-
-            .tm-player-block {
-                padding: 15px;
-                background: #1dcae0;
-                border-radius: 6px;
-                border: 1px solid #fc6;
-            }
-
-            .tm-city-block {
-                padding: 15px;
-                background: #113344;
-                border-radius: 6px;
-                margin-bottom: 15px;
-                border: 1px solid #fc6;
-            }
-
-            #troopManagerPopup,
-            #troopDataPopup {
-                color: #ffd700 !important;
-                font-family: Verdana, sans-serif;
-            }
-
-            .grep-notification {
-                position: fixed;
-                top: 20px;
-                right: 20px;
-                padding: 10px 20px;
-                background-color: #4CAF50;
-                color: white;
-                border-radius: 4px;
-                z-index: 10000;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-                font-family: Arial, sans-serif;
-                animation: fadeIn 0.3s;
-            }
-
-            .grep-notification.error {
-                background-color: #F44336;
-            }
-
-            @keyframes fadeIn {
-                from { opacity: 0; transform: translateY(-20px); }
-                to { opacity: 1; transform: translateY(0); }
-            }
-        `;
-            if (document.head) {
-                document.head.appendChild(styleElement);
-            } else {
-                console.error('Document head not found');
-            }
-        }
-
-        toggle(active) {
-            const popup = document.getElementById('gm-popup');
-            if (active) {
-                this.showControlPanel();
-                this.manager.showNotification("Troop Manager geactiveerd");
-            } else {
-                if (popup) popup.remove();
-                this.manager.showNotification("Troop Manager gedeactiveerd", false);
-            }
-        }
-
     }
 
     // ===================== //
     // Afwezigheidsassistent //
     // ===================== //
 
-    function injectAfwezigheidsassistent() {
-        if (document.getElementById('afwezigheid-ui')) return;
+    class Afwezigheidsassistent {
+        formatDate(dateStr) {
+            if (!dateStr) return '';
+            const [yyyy, mm, dd] = dateStr.split('-');
+            return `${dd}-${mm}-${yyyy}`;
+        }
+        constructor(main) {
+            this.main = main;
+            this.container = null;
+            this.afwezigheidsInterval = null;
+        }
 
-        console.log('[GrepolisManager] Afwezigheidsassistent injectie gestart');
+        async renderSettings(container) {
+            this.container = container;
+            container.innerHTML = ''; // leegmaken
 
-        const ui = document.createElement('div');
-        ui.id = 'afwezigheid-ui';
-        ui.style.cssText = `
-        display: flex;
-        flex-wrap: wrap;
-        gap: 5px;
-        margin: 20px;
-        padding: 10px;
-        background: #2c2c2c;
-        border: 1px solid #FF0000;
-        border-radius: 5px;
-        color: white;
-        position: fixed;
-        top: 50px;
-        left: 50px;
-        z-index: 9999;
-    `;
+            const wrapper = document.createElement('div');
+            wrapper.className = 'afw-wrapper';
 
-        const naam = document.createElement('input');
-        naam.placeholder = 'Speler';
-        naam.value = unsafeWindow.Game?.player_name || '';
-        naam.style.width = '120px';
-        ui.appendChild(naam);
+            const titel = document.createElement('h2');
+            titel.textContent = 'Afwezigheids Manager';
+            wrapper.appendChild(titel);
 
-        const van = document.createElement('input');
-        van.type = 'date';
-        ui.appendChild(van);
+            const ui = document.createElement('div');
+            ui.className = 'afw-ui';
 
-        const tot = document.createElement('input');
-        tot.type = 'date';
-        ui.appendChild(tot);
+            ui.innerHTML = `
+    <input id="gm-afw-naam" placeholder="Speler" value="${unsafeWindow.Game?.player_name || ''}"/>
+    <input id="gm-afw-van" type="date" />
+    <input id="gm-afw-tot" type="date" />
+    <label title="Vakantiemodus actief?" style="display:flex;align-items:center;gap:4px;">
+      <input type="checkbox" id="gm-afw-vm" /> Vakantie Modus
+    </label>
+    <input id="gm-afw-reden" placeholder="Opmerking" style="width:160px;" />
+    <button id="gm-afw-btn">Voeg toe</button>
+  `;
+            wrapper.appendChild(ui);
 
-        const vm = document.createElement('input');
-        vm.type = 'checkbox';
-        vm.title = 'Vakantiemodus aan?';
-        ui.appendChild(vm);
+            const table = document.createElement('table');
+            table.innerHTML = `
+    <thead>
+      <tr>
+        <th>Speler</th>
+        <th>Van</th>
+        <th>Tot</th>
+        <th>Vakantie Modus</th>
+        <th>Reden</th>
+      </tr>
+    </thead>
+    <tbody id="afwezigheids-tabel-rijen"></tbody>
+  `;
+            wrapper.appendChild(table);
 
-        const opmerking = document.createElement('input');
-        opmerking.placeholder = 'Opmerking';
-        opmerking.style.width = '160px';
-        ui.appendChild(opmerking);
+            container.appendChild(wrapper);
 
-        const knop = document.createElement('button');
-        knop.textContent = 'Voeg toe';
-        knop.style.cssText = 'background:#f00;color:white;padding:5px;';
-        ui.appendChild(knop);
+            // 🎯 Event
+            container.querySelector('#gm-afw-btn').addEventListener('click', async () => {
+                const van = container.querySelector('#gm-afw-van').value;
+                const tot = container.querySelector('#gm-afw-tot').value;
+                if (!van || !tot) return alert('Start- en einddatum zijn verplicht');
 
-        document.body.appendChild(ui);
+                await this.exportToSupabase();
+                await this.postToForum();
+                this.main.showNotification("Afwezigheid toegevoegd aan forum");
 
-        knop.addEventListener('click', async () => {
-            if (!van.value || !tot.value) {
-                alert('Start- en einddatum zijn verplicht');
-                return;
+                // Reset
+                container.querySelector('#gm-afw-van').value = '';
+                container.querySelector('#gm-afw-tot').value = '';
+                container.querySelector('#gm-afw-vm').checked = false;
+                container.querySelector('#gm-afw-reden').value = '';
+            });
+
+            // 🔁 Automatische refresh
+            await this.updateAfwezigheidstabel();
+            await this.cleanUpExpiredAbsences();
+
+            this.afwezigheidsInterval = setInterval(() => {
+                this.updateAfwezigheidstabel();
+                this.cleanUpExpiredAbsences();
+            }, 5 * 60 * 1000);
+        }
+
+
+        async exportToSupabase() {
+            const url = await GM_getValue('supabase_url');
+            const key = await GM_getValue('supabase_api_key');
+            if (!url || !key) return;
+
+            const payload = {
+                speler: document.getElementById('gm-afw-naam')?.value || 'onbekend',
+                reden: document.getElementById('gm-afw-reden')?.value || '',
+                van: document.getElementById('gm-afw-van')?.value,
+                tot: document.getElementById('gm-afw-tot')?.value,
+                vakantie: document.getElementById('gm-afw-vm')?.checked || false
+            };
+
+            try {
+                await fetch(`${url}/rest/v1/afwezigheden`, {
+                    method: 'POST',
+                    headers: {
+                        'apikey': key,
+                        'Authorization': `Bearer ${key}`,
+                        'Content-Type': 'application/json',
+                        'Prefer': 'resolution=merge-duplicates'
+                    },
+                    body: JSON.stringify(payload)
+                });
+                this.main.showNotification('✅ Afwezigheid geëxporteerd naar Supabase');
+            } catch (e) {
+                console.error('❌ Fout bij export naar Supabase:', e);
+                this.main.showNotification('❌ Fout bij export naar Supabase');
+            }
+        }
+
+        async fetchAbsencesFromSupabase() {
+            const url = await GM_getValue('supabase_url');
+            const key = await GM_getValue('supabase_api_key');
+            if (!url || !key) return [];
+
+            try {
+                const response = await fetch(`${url}/rest/v1/afwezigheden`, {
+                    headers: {
+                        'apikey': key,
+                        'Authorization': `Bearer ${key}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (!response.ok) throw new Error("Fout bij ophalen");
+
+                return await response.json();
+            } catch (err) {
+                console.error("Fout bij ophalen afwezigheden uit Supabase:", err);
+                return [];
+            }
+        }
+
+        async updateAfwezigheidstabel() {
+
+            const data = await this.fetchAbsencesFromSupabase();
+            const tbody = document.getElementById('afwezigheids-tabel-rijen');
+            if (!tbody) return;
+
+            tbody.innerHTML = '';
+
+            for (const entry of data) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                <td style="padding:3px;border:1px solid #ccc;">${entry.speler}</td>
+                <td style="padding:3px;border:1px solid #ccc;">${this.formatDate(entry.van)}</td>
+                <td style="padding:3px;border:1px solid #ccc;">${this.formatDate(entry.tot)}</td>
+                <td style="padding:3px;border:1px solid #ccc;">${entry.vakantie ? 'Ja' : 'Nee'}</td>
+                <td style="padding:3px;border:1px solid #ccc;">${entry.reden || '-'}</td>
+            `;
+                tbody.appendChild(tr);
+            }
+        }
+
+        async postToForum() {
+            const naam = document.getElementById('gm-afw-naam')?.value || 'onbekend';
+            const van = document.getElementById('gm-afw-van')?.value;
+            const tot = document.getElementById('gm-afw-tot')?.value;
+            const vm = document.getElementById('gm-afw-vm')?.checked;
+            const reden = document.getElementById('gm-afw-reden')?.value || '-';
+
+            function formatDate(dateStr) {
+                if (!dateStr) return '';
+                const [yyyy, mm, dd] = dateStr.split('-');
+                return `${dd}-${mm}-${yyyy}`;
             }
 
-            // Zoek de eerste bewerkbare post op de pagina
-            const editBtn = Array.from(document.querySelectorAll('a')).find(a =>
-                                                                            a.textContent.includes('Bewerken') && a.getAttribute('onclick')?.includes('Forum.postEdit')
-                                                                           );
+            const newRow = `[*][player]${naam}[/player][|]${formatDate(van)}[|]${formatDate(tot)}[|]${vm ? 'Ja' : 'Nee'}[|]${reden}[/*]\n`;
 
-            if (!editBtn) {
-                alert('Geen Bewerken-knop gevonden op deze pagina');
-                return;
+            const forumBtn = document.querySelector('li.allianceforum.main_menu_item span.name_wrapper span');
+            if (!forumBtn) return alert('Alliantieforum knop niet gevonden!');
+            forumBtn.click();
+
+            await new Promise(res => setTimeout(res, 800));
+            const forumLinks = [...document.querySelectorAll('a.submenu_link[data-menu_name] span.forum_menu')];
+            const algemeenLink = forumLinks.find(span => span.textContent.trim().toLowerCase() === 'algemeen');
+            if (!algemeenLink) return alert('Forum "Algemeen" niet gevonden!');
+            algemeenLink.click();
+
+            let afwezigTopic = null;
+            let foundTopics = [];
+            for (let tries = 0; tries < 10 && !afwezigTopic; tries++) {
+                await new Promise(res => setTimeout(res, 600));
+                const topicLinks = [...document.querySelectorAll('#threadlist > li > div.title_author_wrapper > div.title > a')];
+                foundTopics = topicLinks.map(a => a.textContent.trim());
+                afwezigTopic = topicLinks.find(a => a.textContent.toLowerCase().includes('afwezig'));
             }
 
-            editBtn.click(); // Simuleer klik op Bewerken
+            if (!afwezigTopic) return alert('Topic "Afwezig" niet gevonden!\nGevonden topics: ' + foundTopics.join(', '));
+            afwezigTopic.click();
 
-            // Wacht tot textarea verschijnt
+            await new Promise(res => setTimeout(res, 800));
+
+            const editBtn = [...document.querySelectorAll('a')].find(a =>
+                                                                     a.textContent.includes('Bewerken') && a.getAttribute('onclick')?.includes('Forum.postEdit')
+                                                                    );
+            if (!editBtn) return alert('Geen Bewerken-knop gevonden op deze pagina');
+            editBtn.click();
+
             let textarea = null;
             const start = Date.now();
             while (!textarea && Date.now() - start < 5000) {
@@ -2898,175 +4431,43 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
                 await new Promise(res => setTimeout(res, 100));
             }
 
-            if (!textarea) {
-                alert('Kon tekstveld niet laden');
-                return;
-            }
+            if (!textarea) return alert('Kon tekstveld niet laden');
+            textarea.value = textarea.value.includes('[/table]')
+                ? textarea.value.replace('[/table]', `${newRow}[/table]`)
+            : textarea.value + `\n${newRow}`;
 
-            const newRow = `[*][player]${naam.value}[/player][|]${van.value}[|]${tot.value}[|]${vm.checked ? 'Ja' : 'Nee'}[|]${opmerking.value || '-'}[/*]\n`;
-            if (textarea.value.includes('[/table]')) {
-                textarea.value = textarea.value.replace('[/table]', `${newRow}[/table]`);
-            } else {
-                textarea.value += `\n${newRow}`;
-            }
-
-            // Zoek Opslaan-knop
-            const saveBtn = Array.from(document.querySelectorAll('#post_save_form a')).find(a =>
-                                                                                            a.textContent.toLowerCase().includes('opslaan')                                                                      );
+            const saveBtn = [...document.querySelectorAll('#post_save_form a')].find(a =>
+                                                                                     a.textContent.toLowerCase().includes('opslaan')
+                                                                                    );
             if (saveBtn) saveBtn.click();
-
-            // Reset velden
-            van.value = '';
-            tot.value = '';
-            vm.checked = false;
-            opmerking.value = '';
-        });
-    }
-
-    // ============= //
-    // map creator   //
-    // ============= //
-
-    class MapDataLoader {
-        constructor(world) {
-            this.world = world;
-            this.baseUrl = `https://${world}.grepolis.com/data`;
         }
 
-        static detectWorld() {
-            const hostMatch = window.location.host.match(/^(.*?)\.grepolis\.com/);
-            return hostMatch ? hostMatch[1] : null;
-        }
+        async cleanUpExpiredAbsences() {
+            const url = await GM_getValue('supabase_url');
+            const key = await GM_getValue('supabase_api_key');
+            if (!url || !key) return;
 
-        async loadTowns() {
-            const url = `${this.baseUrl}/towns.txt`;
-            const text = await this.gmFetch(url);
-            return this.parseTowns(text);
-        }
+            try {
+                const now = new Date();
+                const cutoff = new Date(now.getTime() - (48 * 60 * 60 * 1000)); // 48 uur geleden
 
-        gmFetch(url) {
-            return new Promise((resolve, reject) => {
-                GM.xmlHttpRequest({
-                    method: "GET",
-                    url,
-                    onload: res => resolve(res.responseText),
-                    onerror: reject
+                const isoCutoff = cutoff.toISOString().split('T')[0]; // yyyy-mm-dd
+
+                await fetch(`${url}/rest/v1/afwezigheden?tot=lt.${isoCutoff}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'apikey': key,
+                        'Authorization': `Bearer ${key}`,
+                        'Content-Type': 'application/json'
+                    }
                 });
-            });
-        }
 
-        parseTowns(text) {
-            return text.trim().split('\n').map(line => {
-                const [id, player_id, x, y, name, island_x, island_y] = line.split(';');
-                return { id, player_id, x, y, name, island_x, island_y };
-            });
-        }
-    }
-
-    class CanvasMap {
-        constructor(container, towns) {
-            this.container = container;
-            this.towns = towns;
-            this.zoom = 1.0;
-            this.scale = 1.6;
-            this.offsetX = 0;
-            this.offsetY = 0;
-            this.dragging = false;
-            this.lastMouse = null;
-            this.canvas = document.createElement('canvas');
-            this.canvas.width = 2000;
-            this.canvas.height = 1600;
-            this.ctx = this.canvas.getContext('2d');
-            this.container.appendChild(this.canvas);
-
-            this.attachEvents();
-            this.draw();
-        }
-
-        attachEvents() {
-            this.canvas.addEventListener('mousedown', (e) => {
-                this.dragging = true;
-                this.lastMouse = { x: e.clientX, y: e.clientY };
-            });
-            window.addEventListener('mouseup', () => this.dragging = false);
-            this.canvas.addEventListener('mousemove', (e) => {
-                if (!this.dragging) return;
-                const dx = e.clientX - this.lastMouse.x;
-                const dy = e.clientY - this.lastMouse.y;
-                this.offsetX += dx;
-                this.offsetY += dy;
-                this.lastMouse = { x: e.clientX, y: e.clientY };
-                this.draw();
-            });
-            this.canvas.addEventListener('wheel', (e) => {
-                const scale = e.deltaY < 0 ? 1.2 : 0.8;
-                const rect = this.canvas.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
-                const worldX = (mouseX - this.offsetX) / this.zoom;
-                const worldY = (mouseY - this.offsetY) / this.zoom;
-                this.zoom *= scale;
-                const newMouseX = worldX * this.zoom + this.offsetX;
-                const newMouseY = worldY * this.zoom + this.offsetY;
-                this.offsetX += mouseX - newMouseX;
-                this.offsetY += mouseY - newMouseY;
-                this.draw();
-            });
-        }
-
-        draw() {
-            const ctx = this.ctx;
-            ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-            ctx.fillStyle = "#003366";
-            ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-            ctx.save();
-            ctx.translate(this.offsetX, this.offsetY);
-            ctx.scale(this.zoom, this.zoom);
-
-            // Grid
-            ctx.strokeStyle = '#336699';
-            for (let i = 0; i <= 2000; i += 100) {
-                ctx.beginPath(); ctx.moveTo(i * this.scale, 0); ctx.lineTo(i * this.scale, 2000 * this.scale); ctx.stroke();
-                ctx.beginPath(); ctx.moveTo(0, i * this.scale); ctx.lineTo(2000 * this.scale, i * this.scale); ctx.stroke();
+                console.log('[Afwezigheidsassistent] Verwijderde verlopen afwezigheden vóór:', isoCutoff);
+            } catch (err) {
+                console.error('❌ Fout bij opschonen verlopen afwezigheden:', err);
             }
-
-            // Steden
-            for (const town of this.towns) {
-                if (!town.x || !town.y) continue;
-                const x = parseFloat(town.x) * this.scale;
-                const y = parseFloat(town.y) * this.scale;
-                ctx.beginPath();
-                ctx.arc(x, y, 5, 0, 2 * Math.PI);
-                ctx.fillStyle = town.player_id === "0" ? "#ccc" : "#ffcc00";
-                ctx.fill();
-            }
-
-            ctx.restore();
-        }
-    }
-
-    class MapManager {
-        constructor(mainManager) {
-            this.main = mainManager;
         }
 
-        async toggle(active) {
-            if (!active) return;
-            const world = MapDataLoader.detectWorld();
-            const loader = new MapDataLoader(world);
-            const towns = await loader.loadTowns();
-            const win = window.open('', '_blank');
-            win.document.write(`<html><head><title>Kaart</title><style>body{margin:0;}</style></head>
-        <body><div id="mapContainer"></div>
-        <script>${CanvasMap.toString()}</script>
-        <script>
-            const towns = ${JSON.stringify(towns)};
-            (function() {
-                new CanvasMap(document.body, towns);
-            })();
-        <\/script></body></html>`);
-            win.document.close();
-        }
     }
 
     // ======================== //
@@ -3277,6 +4678,11 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
             };
         }
 
+        updateFarmCounter() {
+            console.log("Farm counter updated!");
+            // TODO: hier je logica om de teller bij te werken
+        }
+
         waitForDocumentReady() {
             const checkReady = setInterval(() => {
                 if (document.readyState === 'complete') {
@@ -3301,7 +4707,6 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
         getTagsOnMap() {
             const original = MapTiles.createTownDiv;
             MapTiles.createTownDiv = (...args) => {
-                console.log("✅ createTownDiv aangeroepen", args);
                 const result = original.apply(MapTiles, args);
                 return result;
             };
@@ -3554,18 +4959,49 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
 
     // Move hasAdminAccess outside the class
     async function hasAdminAccess(main) {
-        const player = main.modules?.forumManager?.getPlayerName()?.toLowerCase();
-        const role = main.modules?.forumManager?.getPlayerRole?.()?.toLowerCase();
+        // fallback player name
+        const playerName = (main.modules?.forumManager?.getPlayerName?.() || main.uw?.Game?.player_name || "").toString().trim().toLowerCase();
         const devs = ['boodtrap', 'zambia1972', 'elona', 'joppie86'];
 
-        if (devs.includes(player)) return true;
+        if (!playerName) return false;
+        if (devs.includes(playerName)) return true;
 
+        // handmatig ingestelde admins altijd checken
+        const manualAdmins = (await GM_getValue('admin_list', [])) || [];
+        if (manualAdmins.map(n => (n||"").toLowerCase()).includes(playerName)) return true;
+
+        // leiders mogen admin zijn (checkbox)
         const allowLeaders = await GM_getValue('leaders_are_admins', true);
-        if (allowLeaders && (role === 'leider' || role === 'oprichter')) return true;
+        if (allowLeaders) {
+            // 1) probeer role (snelle check)
+            const role = (main.modules?.forumManager?.getPlayerRole?.() || "").toLowerCase?.() || "";
+            if (role === 'leider' || role === 'oprichter') return true;
 
-        const manualAdmins = await GM_getValue('admin_list', []);
-        return manualAdmins.map(n => n.toLowerCase()).includes(player);
+            // fallback: lees leiders via de centrale methode (storage + DOM)
+            try {
+                let leaders = [];
+                if (main.supabaseSync && typeof main.supabaseSync.getAllianceLeaders === 'function') {
+                    leaders = await main.supabaseSync.getAllianceLeaders();
+                } else if (main.settingsWindow && typeof main.settingsWindow.getAllianceLeaders === 'function') {
+                    // fallback synchronous scrape als supabaseSync nog niet klaar is
+                    leaders = main.settingsWindow.getAllianceLeaders() || [];
+                } else {
+                    leaders = await GM_getValue('leaders_list', []) || [];
+                }
+                if (leaders.map(n => (n||"").toLowerCase()).includes(playerName)) return true;
+            } catch (e) {
+                console.warn("[hasAdminAccess] leaders check failed:", e);
+            }
+
+        }
+
+        return false;
     }
+
+
+    // -------------------------
+    // --- instellingen --------
+    // -------------------------
 
     class SettingsWindow {
         constructor(main) {
@@ -3573,217 +5009,335 @@ Bekijk in je Supabase dashboard of de gegevens worden bijgehouden
             this.uw = main.uw;
         }
 
-        async toggle() {
-            const playerName = this.main.modules?.forumManager?.getPlayerName() || 'Speler';
+        getAllianceLeaders() {
+            const leaders = [];
+            try {
+                const rows = document.querySelectorAll("#ally_members_body tr");
+                rows.forEach(row => {
+                    const anchor = row.querySelector("td.ally_name .gp_player_link");
+                    let name = "";
+                    if (anchor) {
+                        name = Array.from(anchor.childNodes)
+                            .filter(n => n.nodeType === Node.TEXT_NODE)
+                            .map(n => n.textContent.trim())
+                            .join(" ")
+                            .trim();
+                        if (!name) name = anchor.textContent.trim();
+                    } else {
+                        const cell = row.querySelector("td.ally_name");
+                        name = cell ? cell.textContent.trim() : "";
+                    }
+                    if (!name) return;
 
+                    const oprichterImg = row.querySelector("td:nth-child(5) img");
+                    const leiderImg    = row.querySelector("td:nth-child(6) img");
+
+                    const imgIsChecked = (img) => {
+                        if (!img) return false;
+                        const src = (img.getAttribute("src") || "").toLowerCase();
+                        const alt = (img.getAttribute("alt") || "").toLowerCase();
+                        const cls = (img.className || "").toLowerCase();
+                        if (cls.includes("checked")) return true;
+                        if (/checkmark/i.test(src)) return true;
+                        if (alt.includes("heeft dit recht") && !alt.includes("niet")) return true;
+                        return false;
+                    };
+
+                    const isOprichter = imgIsChecked(oprichterImg);
+                    const isLeider    = imgIsChecked(leiderImg);
+
+                    if (isOprichter || isLeider) {
+                        if (!leaders.includes(name)) leaders.push(name);
+                    }
+                });
+            } catch (e) {
+                console.warn("[SettingsWindow] kon leiders niet ophalen:", e);
+            }
+            return leaders;
+        }
+        async render(container) {
             const isAdmin = await hasAdminAccess(this.main);
-            if (!isAdmin) return this.main.showNotification("Geen toegang tot instellingen.", false);
-
-            const pin = await GM_getValue('settings_pin', null);
-            if (pin) {
-                const input = prompt("Voer pincode in:");
-                if (input !== pin) return alert("Foutieve pincode.");
+            if (!isAdmin) {
+                return this.main.showNotification("Geen toegang tot instellingen.", false);
             }
 
-            if (document.getElementById('gm-settings')) return;
-
-            const container = document.createElement('div');
-            container.id = 'gm-settings';
-            container.style.cssText = `
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            z-index: 10000;
-            background: #1e1e1e;
-            border: 2px solid #FF0000;
-            padding: 20px;
-            color: white;
-            font-family: sans-serif;
-            width: 800px;
-            max-height: 90vh;
-            overflow-y: auto;
-            border-radius: 10px;
-            box-shadow: 0 0 20px red;
+            container.innerHTML = `
+            <h2 class="gm-panel-title">Instellingen</h2>
+            <div id="gm-tab-buttons" style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
+                <button class="gm-button" data-tab="supabase">⚙️ Supabase</button>
+                <button class="gm-button" data-tab="wereldinfo">🌍 Wereldinfo</button>
+                <button class="gm-button" data-tab="overlay">🗺️ Overlay</button>
+                <button class="gm-button" data-tab="ban">🚫 Ban</button>
+                <button class="gm-button" data-tab="admin">👑 Admin</button>
+            </div>
+            <div id="gm-settings-content"></div>
         `;
 
-            container.innerHTML = `<h2 style="text-align:center;color:#FF0000;">Instellingen</h2><div id="gm-settings-content"></div>`;
-            document.body.appendChild(container);
-            this.renderSupabaseTab(container.querySelector('#gm-settings-content'));
+            // standaard naar supabase
+            await this.renderTab("supabase");
+
+            container.querySelectorAll("#gm-tab-buttons .gm-button").forEach(btn => {
+                btn.addEventListener("click", () => this.renderTab(btn.dataset.tab));
+            });
         }
 
+        async toggle() {
+            const isAdmin = await hasAdminAccess(this.main);
+            if (!isAdmin) return this.main.showNotification("Geen toegang tot instellingen.", false);
+            this.main.openPanel("settings", (c) => this.render(c), "gm-panel-medium");
+        }
+
+        async renderTab(tab) {
+            const content = document.getElementById("gm-settings-content");
+            if (!content) return;
+            content.innerHTML = "";
+
+            const isAdmin = await hasAdminAccess(this.main);
+
+            if (tab === "supabase") await this.renderSupabaseTab(content);
+            else if (tab === "wereldinfo") {
+                if (isAdmin) await this.renderWereldinfoTab(content);
+                else content.innerHTML = "<p class='gm-muted'>Geen toegang tot Wereldinfo.</p>";
+            }
+            else if (tab === "overlay") this.renderOverlayTab(content);
+            else if (tab === "ban") {
+                if (isAdmin) await this.renderBanTab(content);
+                else content.innerHTML = "<p class='gm-muted'>Geen toegang tot Banlijst.</p>";
+            }
+            else if (tab === "admin") {
+                if (isAdmin) await this.renderAdminTab(content);
+                else content.innerHTML = "<p class='gm-muted'>Geen toegang tot Adminbeheer.</p>";
+            }
+
+            document.querySelectorAll("#gm-tab-buttons .gm-button").forEach(btn => {
+                btn.style.opacity = btn.dataset.tab === tab ? "1" : "0.7";
+            });
+        }
+
+
+        // ---------------- SUPABASE ----------------
         async renderSupabaseTab(container) {
-            const supabaseURL = await GM_getValue('supabase_url', '');
-            const supabaseKey = await GM_getValue('supabase_api_key', '');
-            const banned = await GM_getValue('banned_players', []);
-            const autoUpload = await GM_getValue('auto_upload_enabled', true);
+            const supabaseURL = await GM_getValue("supabase_url", "");
+            const supabaseKey = await GM_getValue("supabase_api_key", "");
+            const autoUpload = await GM_getValue("auto_upload_enabled", true);
 
-            const player = this.main.modules?.forumManager?.getPlayerName() || 'Speler';
-            const isBanned = banned.includes(player);
-
-            const html = `
-            <h3 style="color:#FF0000;">Supabase Configuratie</h3>
-            <label>URL: <input type="text" value="${supabaseURL}" disabled style="width:100%;margin-bottom:5px;" /></label><br>
-            <label>API Key: <input type="password" value="${supabaseKey}" disabled style="width:100%;margin-bottom:10px;" /></label><br>
-            <button id="gm-reset-supabase" style="margin-right:10px;">🔄 Reset gegevens</button>
-            <button id="gm-export" style="margin-right:10px;">⬇️ Exporteer settings</button>
-            <button id="gm-import" style="margin-right:10px;">⬆️ Importeer settings</button>
-            <label style="margin-left:10px;"><input type="checkbox" id="gm-toggle-upload" ${autoUpload ? 'checked' : ''}> Auto-upload actief</label>
-            <hr>
-            <h4 style="color:#FF0000;">Spelers bannen</h4>
-            <input id="gm-banname" placeholder="Spelernaam" style="width: 50%;margin-bottom:5px;" />
-            <button id="gm-ban-add">➕ Ban</button>
-            <button id="gm-ban-remove">➖ Unban</button>
-            <div id="gm-banlist" style="margin-top:10px;font-size:12px;"></div>
-            <hr>
-            <h4 style="color:#FF0000;">Pincode instellen (optioneel)</h4>
-            <input type="password" id="gm-pin" placeholder="Nieuwe pincode" style="width: 50%;" />
-            <button id="gm-save-pin">💾 Opslaan</button>
-            <hr>
-            <h4 style="color:#FF0000;">Admin toegang beheren</h4>
-            <input id="gm-adminname" placeholder="Voeg speler toe als admin" style="width: 50%;" />
-            <button id="gm-admin-add">➕ Voeg toe</button>
-            <button id="gm-admin-remove">➖ Verwijder</button><br><br>
-            <label><input type="checkbox" id="gm-toggle-leaders" ${await GM_getValue('leaders_are_admins', true) ? 'checked' : ''}/> Leiders/Oprichters hebben automatisch toegang</label>
-            <div id="gm-adminlist" style="font-size:12px;margin-top:8px;"></div>
-            <div id="gm-effective-admins" style="font-size:12px;margin-top:8px;"></div>
-            <hr>
-            <button id="gm-close-settings" style="margin-top:10px;">❌ Sluiten</button>
+            container.innerHTML = `
+            <h3 class="gm-title">Supabase configuratie</h3>
+            <label>URL
+              <input class="gm-input" type="text" value="${supabaseURL}" disabled />
+            </label>
+            <label>API Key
+              <input class="gm-input" type="password" value="${supabaseKey}" disabled />
+            </label>
+            <div style="margin:8px 0;">
+              <button id="gm-reset-supabase" class="gm-button">🔄 Reset gegevens</button>
+              <button id="gm-export" class="gm-button">⬇️ Exporteer settings</button>
+              <button id="gm-import" class="gm-button">⬆️ Importeer settings</button>
+              <label style="margin-left:10px;">
+              <hr>
+                <input type="checkbox" id="gm-toggle-upload" ${autoUpload ? "checked" : ""}/> Auto-upload actief
+              </label>
+            </div>
         `;
 
-            container.innerHTML = html;
-
-            // Events
-            document.getElementById('gm-close-settings').addEventListener('click', () => {
-                document.getElementById('gm-settings').remove();
-            });
-
-            document.getElementById('gm-reset-supabase').addEventListener('click', async () => {
-                await GM_deleteValue('supabase_url');
-                await GM_deleteValue('supabase_api_key');
+            container.querySelector('#gm-reset-supabase').addEventListener('click', async () => {
+                await GM_deleteValue("supabase_url");
+                await GM_deleteValue("supabase_api_key");
                 location.reload();
             });
-
-            document.getElementById('gm-export').addEventListener('click', async () => {
-                const keys = ['supabase_url', 'supabase_api_key', 'banned_players', 'settings_pin', 'auto_upload_enabled'];
+            container.querySelector('#gm-export').addEventListener('click', async () => {
+                const keys = ['supabase_url', 'supabase_api_key', 'auto_upload_enabled'];
                 const data = {};
                 for (const key of keys) data[key] = await GM_getValue(key);
                 GM_setClipboard(JSON.stringify(data, null, 2));
                 alert("Instellingen gekopieerd naar klembord.");
             });
-
-            document.getElementById('gm-import').addEventListener('click', async () => {
+            container.querySelector('#gm-import').addEventListener('click', async () => {
                 const json = prompt("Plak hier je JSON instellingen:");
                 if (!json) return;
                 try {
                     const data = JSON.parse(json);
-                    for (const key in data) {
-                        await GM_setValue(key, data[key]);
-                    }
+                    for (const key in data) await GM_setValue(key, data[key]);
                     location.reload();
-                } catch (e) {
+                } catch {
                     alert("Ongeldige JSON.");
                 }
             });
-
-            document.getElementById('gm-toggle-upload').addEventListener('change', async (e) => {
-                await GM_setValue('auto_upload_enabled', e.target.checked);
-                this.main.showNotification('Auto-upload bijgewerkt.');
+            container.querySelector('#gm-toggle-upload').addEventListener('change', async (e) => {
+                await GM_setValue("auto_upload_enabled", e.target.checked);
             });
+        }
 
-            document.getElementById('gm-ban-add').addEventListener('click', async () => {
-                const name = document.getElementById('gm-banname').value.trim();
+        // ---------------- WERELDINFO ----------------
+        async renderWereldinfoTab(container) {
+            const url = await GM_getValue("wereldinfo_url", "");
+            container.innerHTML = `
+            <h3 class="gm-title">Wereldinfo</h3>
+            <input type="text" id="gm-wi-url" class="gm-input" placeholder="https://..." style="width:100%; margin-bottom:5px;" value="${url}" />
+            <button id="gm-save-wi-url" class="gm-button">💾 Opslaan</button>
+        `;
+            container.querySelector("#gm-save-wi-url").addEventListener("click", async () => {
+                await GM_setValue("wereldinfo_url", container.querySelector("#gm-wi-url").value.trim());
+                alert("Wereldinfo-URL opgeslagen.");
+            });
+        }
+
+        // ---------------- OVERLAY ----------------
+        renderOverlayTab(container) {
+            if (this.main.modules?.mapOverlay?.renderSettingsUI) {
+                const overlayDiv = document.createElement("div");
+                overlayDiv.className = "gm-card";
+                this.main.modules.mapOverlay.renderSettingsUI(overlayDiv);
+                container.appendChild(overlayDiv);
+            } else {
+                container.innerHTML = "<p class='gm-muted'>Overlay module niet beschikbaar.</p>";
+            }
+        }
+
+        // ---------------- BAN ----------------
+        async renderBanTab(container) {
+            const bans = (await GM_getValue("banned_players", [])) || [];
+            container.innerHTML = `
+        <h3 class="gm-title">Banlijst</h3>
+        <div style="display:flex; gap:6px; align-items:center; margin-bottom:6px;">
+          <input id="gm-banname" class="gm-input" placeholder="Spelernaam" style="max-width:300px;" />
+          <button id="gm-ban-add" class="gm-button">➕ Ban</button>
+          <button id="gm-ban-remove" class="gm-button">➖ Unban</button>
+        </div>
+        <div id="gm-banlist" class="gm-muted" style="font-size:12px;">${bans.length ? bans.join(", ") : "—"}</div>
+    `;
+
+            container.querySelector("#gm-ban-add").addEventListener("click", async () => {
+                const name = container.querySelector("#gm-banname").value.trim();
                 if (!name) return;
-                const bans = await GM_getValue('banned_players', []);
-                if (!bans.includes(name)) bans.push(name);
-                await GM_setValue('banned_players', bans);
-                this.renderSupabaseTab(container);
+                const set = new Set(bans);
+                set.add(name);
+                await GM_setValue("banned_players", Array.from(set));
+                await this.renderBanTab(container);
             });
 
-            document.getElementById('gm-ban-remove').addEventListener('click', async () => {
-                const name = document.getElementById('gm-banname').value.trim();
-                const bans = await GM_getValue('banned_players', []);
-                const updated = bans.filter(n => n !== name);
-                await GM_setValue('banned_players', updated);
-                this.renderSupabaseTab(container);
-            });
-
-            document.getElementById('gm-save-pin').addEventListener('click', async () => {
-                const pin = document.getElementById('gm-pin').value.trim();
-                if (!pin) return alert("Geen pincode ingevoerd.");
-                await GM_setValue('settings_pin', pin);
-                alert("Pincode opgeslagen.");
-            });
-
-            document.getElementById('gm-admin-add').addEventListener('click', async () => {
-                const name = document.getElementById('gm-adminname').value.trim();
+            container.querySelector("#gm-ban-remove").addEventListener("click", async () => {
+                const name = container.querySelector("#gm-banname").value.trim();
                 if (!name) return;
-                const list = await GM_getValue('admin_list', []);
-                if (!list.includes(name)) list.push(name);
-                await GM_setValue('admin_list', list);
-                this.renderSupabaseTab(container);
+                const set = new Set(bans);
+                set.delete(name);
+                await GM_setValue("banned_players", Array.from(set));
+                await this.renderBanTab(container);
             });
+        }
 
-            document.getElementById('gm-admin-remove').addEventListener('click', async () => {
-                const name = document.getElementById('gm-adminname').value.trim();
-                let list = await GM_getValue('admin_list', []);
-                list = list.filter(n => n !== name);
-                await GM_setValue('admin_list', list);
-                this.renderSupabaseTab(container);
+        // ---------------- ADMIN ----------------
+        async renderAdminTab(container) {
+            const manualAdmins = (await GM_getValue("admin_list", [])) || [];
+            const leadersAreAdmins = await GM_getValue("leaders_are_admins", true);
+            const domLeaders = this.getAllianceLeaders() || [];
+            const storedLeaders = (await GM_getValue("leaders_list", [])) || [];
+
+            // merge, uniek, behoud eerste voorkomend casing
+            const leaderMap = new Map();
+            [...domLeaders, ...storedLeaders].forEach(n => {
+                if (!n) return;
+                const key = n.toString().trim().toLowerCase();
+                if (!key) return;
+                if (!leaderMap.has(key)) leaderMap.set(key, n.toString().trim());
             });
+            const leaders = Array.from(leaderMap.values());
 
-            document.getElementById('gm-toggle-leaders').addEventListener('change', async (e) => {
-                await GM_setValue('leaders_are_admins', e.target.checked);
-                this.main.showNotification('Leiders/Oprichters toegang aangepast.');
-            });
-
-            const admins = await GM_getValue('admin_list', []);
-            document.getElementById('gm-adminlist').innerHTML = `<strong>Manuele admins:</strong> ${admins.length ? admins.join(', ') : '(geen)'}`;
-            // Toon lijst van actieve toegang (behalve developers)
-            const playerRoles = this.main.modules?.forumManager?.getAllPlayersWithRoles?.() || [];
-            const allowLeaders = await GM_getValue('leaders_are_admins', true);
-            const effectiveAdmins = new Set();
-
-            if (allowLeaders) {
-                for (const { name, role } of playerRoles) {
-                    if (['leider', 'oprichter'].includes(role.toLowerCase())) {
-                        effectiveAdmins.add(name);
-                    }
-                }
+            // indien we daadwerkelijk iets uit DOM halen -> persist zodat rest van het script het gebruikt
+            if (domLeaders.length > 0) {
+                await GM_setValue('leaders_list', leaders);
             }
 
-            admins.forEach(name => effectiveAdmins.add(name));
+            container.innerHTML = `
+      <h3 class="gm-title">Adminbeheer</h3>
+      <div style="display:flex; gap:6px; align-items:center; margin-bottom:6px;">
+        <input id="gm-adminname" class="gm-input" placeholder="Spelernaam" style="max-width:300px;" />
+        <button id="gm-admin-add" class="gm-button">➕ Voeg toe</button>
+        <button id="gm-admin-remove" class="gm-button">➖ Verwijder</button>
+      </div>
+      <label style="display:block; margin-top:8px;">
+        <input type="checkbox" id="gm-toggle-leaders" ${leadersAreAdmins ? "checked" : ""}/>
+        Leiders/Oprichters hebben automatisch toegang
+      </label>
+      <div class="gm-muted" style="font-size:12px; margin-top:8px;">
+        <b>Leiders:</b> ${leaders.length ? leaders.join(", ") : "—"}
+      </div>
+      <div class="gm-muted" style="font-size:12px; margin-top:8px;">
+        <b>Admins (handmatig toegevoegd):</b> ${manualAdmins.length ? manualAdmins.join(", ") : "—"}
+      </div>
+    `;
 
-            // Verwijder ontwikkelaars
-            const devs = ['boodtrap', 'zambia1972', 'elona', 'joppie86'];
-            devs.forEach(dev => effectiveAdmins.delete(dev));
+            // Add
+            container.querySelector("#gm-admin-add").addEventListener("click", async () => {
+                const name = container.querySelector("#gm-adminname").value.trim();
+                if (!name) return;
+                const current = (await GM_getValue("admin_list", [])) || [];
+                if (!current.map(n => n.toLowerCase()).includes(name.toLowerCase())) {
+                    current.push(name);
+                    await GM_setValue("admin_list", current);
+                }
+                await this.renderAdminTab(container);
+            });
 
-            // Toon effectief toegestane toegang
-            document.getElementById('gm-effective-admins').innerHTML = `
-                <strong>Toegang tot instellingen:</strong><br>
-                ${Array.from(effectiveAdmins).length ? Array.from(effectiveAdmins).join(', ') : '(geen extra admins)'}
-            `;
+            // Remove
+            container.querySelector("#gm-admin-remove").addEventListener("click", async () => {
+                const name = container.querySelector("#gm-adminname").value.trim();
+                if (!name) return;
+                const current = (await GM_getValue("admin_list", [])) || [];
+                const filtered = current.filter(a => a.toLowerCase() !== name.toLowerCase());
+                await GM_setValue("admin_list", filtered);
+                await this.renderAdminTab(container);
+            });
 
-            // Toon actieve banlijst
-            const banlist = document.getElementById('gm-banlist');
-            banlist.innerHTML = `<strong>Banlijst:</strong> ${banned.length ? banned.join(', ') : '(geen)'}`;
+            // Toggle leaders checkbox
+            container.querySelector("#gm-toggle-leaders").addEventListener("change", async (e) => {
+                await GM_setValue("leaders_are_admins", e.target.checked);
+                await this.renderAdminTab(container);
+            });
         }
+
     }
 
-    // Automatisch activeren bij laden
-    $(function() {
-    });
     // ============================ //
     // Start Grepolis Manager Init  //
     // ============================ //
 
     window.addEventListener('load', () => {
-        new GrepolisManager();
+        const app = new GrepolisManager();
+        // Zet de instantie globaal beschikbaar
+        window.GrepoMain = app;
+        window.GMApp = app; // extra alias voor testen
+        console.log("✅ GrepolisManager gestart:", app);
+    });
 
-    });
-    GM_registerMenuCommand("🛠️ Supabase instellingen wijzigen", async () => {
-        await GM_deleteValue("supabase_url");
-        await GM_deleteValue("supabase_api_key");
-        location.reload();
-    });
+    // Helper: wacht tot een bepaald pad op window bestaat
+    function waitForGlobal(path, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+            const start = Date.now();
+
+            (function check() {
+                const parts = path.split(".");
+                let obj = window;
+
+                for (const p of parts) {
+                    if (obj && p in obj) {
+                        obj = obj[p];
+                    } else {
+                        obj = null;
+                        break;
+                    }
+                }
+
+                if (obj) {
+                    resolve(obj);
+                } else if (Date.now() - start < timeout) {
+                    setTimeout(check, 200);
+                } else {
+                    reject(new Error(`Timeout: ${path} niet gevonden binnen ${timeout}ms`));
+                }
+            })();
+        });
+    }
+
 })();
+
