@@ -364,57 +364,76 @@
 
     class SupabaseSettings {
         static async loadOrPrompt() {
-            let url = await GM_getValue('supabase_url', null);
-            let key = await GM_getValue('supabase_api_key', null);
+    const existingUrl = await GM_getValue('supabase_url', null);
+    const existingKey = await GM_getValue('supabase_api_key', null);
 
-            if (url && key) {
-                return { SUPABASE_URL: url, SUPABASE_API_KEY: key };
+    if (existingUrl && existingKey) {
+        return { SUPABASE_URL: existingUrl, SUPABASE_API_KEY: existingKey };
+    }
+
+    // 🔥 Check: verwijder oude popup indien al aanwezig
+    if (document.getElementById('gm-supabase-popup')) {
+        document.getElementById('gm-supabase-popup').remove();
+    }
+
+    return new Promise(resolve => {
+        const popup = document.createElement('div');
+        popup.id = 'gm-supabase-popup';
+        popup.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 9999999;
+            background: #1e1e1e;
+            border: 2px solid #FF0000;
+            padding: 18px;
+            color: white;
+            font-family: sans-serif;
+            width: 420px;
+            border-radius: 10px;
+            box-shadow: 0 0 30px rgba(255,0,0,0.25);
+        `;
+
+        popup.innerHTML = `
+            <h2 style="color:#FF0000; text-align:center; margin:0 0 8px;">Supabase Configuratie</h2>
+            <label style="font-size:13px">Supabase URL:<br>
+                <input type="text" id="supabase-url" style="width:100%; padding:6px;" placeholder="https://xyz.supabase.co" />
+            </label>
+            <div style="height:8px;"></div>
+            <label style="font-size:13px">API Key:<br>
+                <input type="text" id="supabase-key" style="width:100%; padding:6px;" placeholder="public-anon-key" />
+            </label>
+            <div style="height:12px;"></div>
+            <div style="display:flex; justify-content:space-between; gap:8px;">
+                <button id="save-supabase" style="flex:1; background:#FF0000; color:white; padding:8px; border:none; border-radius:6px; cursor:pointer;">Opslaan</button>
+                <button id="cancel-supabase" style="flex:1; background:#444; color:#FFAAAA; padding:8px; border:1px solid #FF0000; border-radius:6px; cursor:pointer;">Annuleren</button>
+            </div>
+        `;
+
+        document.body.appendChild(popup);
+        const $ = sel => popup.querySelector(sel);
+
+        $('button#save-supabase').addEventListener('click', async () => {
+            const newUrl = $('input#supabase-url').value.trim();
+            const newKey = $('input#supabase-key').value.trim();
+            if (!newUrl || !newKey) {
+                alert('Vul beide velden in.');
+                return;
             }
+            await GM_setValue('supabase_url', newUrl);
+            await GM_setValue('supabase_api_key', newKey);
+            popup.remove();
+            resolve({ SUPABASE_URL: newUrl, SUPABASE_API_KEY: newKey });
+        });
 
-            return new Promise(resolve => {
-                const popup = document.createElement('div');
-                popup.className = 'gm-panel gm-panel-small';
+        $('button#cancel-supabase').addEventListener('click', () => {
+            popup.remove();
+            resolve({ SUPABASE_URL: existingUrl, SUPABASE_API_KEY: existingKey });
+        });
+    });
+}
 
-                popup.innerHTML = `
-                    <h2 class="gm-panel-title" style="text-align:center;">Supabase Configuratie</h2>
-                    <p>Voer hieronder je Supabase gegevens in:</p>
-                    <label>Supabase URL:<br>
-                        <input type="text" id="supabase-url" class="gm-input" placeholder="https://xyz.supabase.co" />
-                    </label><br><br>
-                    <label>API Key:<br>
-                        <input type="text" id="supabase-key" class="gm-input" placeholder="public-anon-key" />
-                    </label><br><br>
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <button id="save-supabase" class="gm-button">Opslaan</button>
-                        <button id="toggle-supabase-help" class="gm-button">❔ Handleiding</button>
-                    </div>
-                    <div id="supabase-help" class="gm-muted" style="display:none; margin-top:15px; max-height:300px; overflow-y:auto;">
-                        <pre>${SupabaseSettings.helpText()}</pre>
-                    </div>
-                `;
-
-                document.body.appendChild(popup);
-
-                document.getElementById('save-supabase').addEventListener('click', async () => {
-                    const newUrl = document.getElementById('supabase-url').value.trim();
-                    const newKey = document.getElementById('supabase-key').value.trim();
-
-                    if (!newUrl || !newKey) {
-                        alert("Vul beide velden in.");
-                        return;
-                    }
-
-                    await GM_setValue('supabase_url', newUrl);
-                    await GM_setValue('supabase_api_key', newKey);
-                    popup.remove();
-                    location.reload(); // Herstart script
-                });
-                document.getElementById("toggle-supabase-help").addEventListener("click", () => {
-                    const help = document.getElementById("supabase-help");
-                    help.style.display = (help.style.display === "none") ? "block" : "none";
-                });
-            });
-        }
 
         static helpText() {
             return `
@@ -547,6 +566,9 @@
                 throw new Error("Geblokkeerde gebruiker.");
             }
             this.supabaseConfig = await SupabaseSettings.loadOrPrompt();
+            // GrepoData optioneel: niet verplicht bij opstarten
+            const token = GM_getValue('grepodata_token', null);
+            this.grepodataToken = token || null; // Geen login-popup meer
             await this.loadResources();
             try {
                 await this.initializeManagers();
@@ -559,6 +581,8 @@
             console.log("Supabase config geladen:", this.supabaseConfig);
         }
 
+
+
         async initializeManagers() {
             this.modules.forumManager = new ForumManager(this);
             this.modules.wereldinfo = new WereldInfo(this);
@@ -570,6 +594,14 @@
             this.modules.mapOverlay.init();
             this.supabaseSync = new SupabaseSync(this);
             this.supabaseSync.start();
+
+            // <<< GrepoData optioneel: vraag token maar blokkeer init niet
+            try {
+                const base = new BaseManager(this);
+                await base.getWebSocketToken();
+            } catch (e) {
+                console.warn('GrepoData token niet beschikbaar, ga door zonder:', e);
+            }
         }
 
         async loadResources() {
@@ -979,45 +1011,9 @@
         }
 
         showLoginPopup() {
-            return new Promise((resolve, reject) => {
-                const popupHtml = `
-      <div id="grepoLoginPopup" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-           background: white; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.2); z-index: 99999; min-width: 320px;">
-        <h3 style="margin-top:0">GrepoData API-token</h3>
-        <p>Ga naar <a href="https://grepodata.com/profile/api" target="_blank">https://grepodata.com/profile/api</a>, log in en kopieer daar je API-token.</p>
-        <label>API Token<br><input type="text" id="gd_token" style="width:100%"></label><br><br>
-        <div style="display:flex; gap:8px; justify-content:flex-end">
-          <button id="gd_cancel">Annuleren</button>
-          <button id="gd_save">Opslaan</button>
-        </div>
-        <div id="gd_msg" style="margin-top:8px; font-size:12px; color:#666;"></div>
-      </div>
-    `;
-                document.body.insertAdjacentHTML('beforeend', popupHtml);
-                const box = document.getElementById('grepoLoginPopup');
-                const elToken = document.getElementById('gd_token');
-                const elMsg   = document.getElementById('gd_msg');
-
-                const finish = (ok, value) => {
-                    box?.remove();
-                    ok ? resolve(value) : reject(value instanceof Error ? value : new Error(String(value)));
-                };
-
-                document.getElementById('gd_cancel').addEventListener('click', () => {
-                    finish(false, new Error("Login geannuleerd"));
-                });
-                document.getElementById('gd_save').addEventListener('click', async () => {
-                    const token = elToken.value.trim();
-                    if (!token) {
-                        elMsg.textContent = "Plak je token in.";
-                        return;
-                    }
-                    await GM_setValue('grepodata_token', token);
-                    await GM_setValue('grepodata_token_time', Date.now());
-                    elMsg.textContent = "Token opgeslagen.";
-                    finish(true, token);
-                });
-            });
+            // GrepoData login uitgeschakeld — geen popup tonen
+            // Retourneer direct null zodat callers weten dat er geen token is.
+            return Promise.resolve(null);
         }
 
         // Centrale toegangspunt voor het token (wacht op login indien nodig)
@@ -1043,17 +1039,26 @@
                 console.warn("[GrepoData] Kon token niet laden uit storage:", e);
             }
 
-            // 3. Geen of verlopen token → login-popup tonen
-            console.warn("[GrepoData] Nieuw token nodig. Toon login-popup…");
-            const token = await this.showLoginPopup();
-            this.accessToken = token;
-            GM_setValue('grepodata_token', token);
-            GM_setValue('grepodata_token_time', Date.now());
-            return token;
+            // 3. Geen of verlopen token → probeer login-popup (maar faal zachtjes)
+            console.warn("[GrepoData] Nieuw token nodig. Toon login-popup… (optioneel)");
+            try {
+                const token = await this.showLoginPopup().catch(() => null);
+                if (!token) {
+                    console.warn('[GrepoData] Geen token verkregen — ga verder zonder GrepoData.');
+                    return null;
+                }
+                this.accessToken = token;
+                GM_setValue('grepodata_token', token);
+                GM_setValue('grepodata_token_time', Date.now());
+                return token;
+            } catch (e) {
+                console.warn('[GrepoData] showLoginPopup faalde:', e);
+                return null;
+            }
         }
 
         async getPlayerIntel(world, playerId) {
-            if (!this.accessToken) throw new Error("Geen accessToken beschikbaar");
+            if (!this.accessToken) { this.logger?.warn('Geen accessToken beschikbaar — GrepoData call overgeslagen'); return null; };
 
             const url = `https://api.grepodata.com/indexer/v2/player?world=${world}&player_id=${playerId}&access_token=${this.accessToken}`;
 
@@ -1070,7 +1075,7 @@
 
 
         async getAllianceIntel(allianceId, world) {
-            if (!this.accessToken) throw new Error("Geen accessToken beschikbaar");
+            if (!this.accessToken) { this.logger?.warn('Geen accessToken beschikbaar — GrepoData call overgeslagen'); return null; };
 
             const url = `https://api.grepodata.com/indexer/v2/alliance?world=${world}&alliance_id=${allianceId}&access_token=${this.accessToken}`;
             console.log("[GrepoData] GET AllianceIntel:", url);
@@ -1087,7 +1092,7 @@
         }
 
         async getTownIntel(townId, world) {
-            if (!this.accessToken) throw new Error("Geen accessToken beschikbaar");
+            if (!this.accessToken) { this.logger?.warn('Geen accessToken beschikbaar — GrepoData call overgeslagen'); return null; };
 
             const url = `https://api.grepodata.com/indexer/v2/town?world=${world}&town_id=${townId}&access_token=${this.accessToken}`;
             console.log("[GrepoData] GET TownIntel:", url);
@@ -5338,6 +5343,9 @@
             })();
         });
     }
+
+})();
+
 
 })();
 
