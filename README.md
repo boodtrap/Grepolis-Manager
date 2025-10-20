@@ -196,7 +196,7 @@ A: Ja, elke gebruiker kan zijn eigen Supabase-project koppelen.
 
 ## 🧾 Credits & Licentie
 
-**Auteur:** Zambia1972 (Hans Gevers)
+**Auteur:** Zambia1972 /boodtrap (Hans Gevers)
 **Copyright © 2025**
 **Licentie:** MIT License
 
