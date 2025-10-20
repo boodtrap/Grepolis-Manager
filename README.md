@@ -1,7 +1,7 @@
 
 # 🏛️ Grepolis Manager
 
-### Alles-in-één Grepolis Script — door *Zambia1972* & *Hans Gevers*
+### Alles-in-één Grepolis Script — door *Zambia1972* aka *boodtrap*
 
 ---
 
