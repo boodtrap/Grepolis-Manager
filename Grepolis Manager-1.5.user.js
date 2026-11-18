@@ -15081,7 +15081,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     this.lastAlertSignature = signature;
                     this.alertTownNames = [...new Set(alerts.map(a => String(a).split(':')[0].trim()).filter(Boolean))];
                     this.lastAlertRows = rows
-                        .filter(row => RESOURCES.some(r => row.sellable[r.key] > 0))
+                        .filter(row => RESOURCES.some(r => row.offers && row.offers[r.key]))
                         .sort((a, b) => this.rowTotalGold(b) - this.rowTotalGold(a));
                     this.updateGoldAlarm();
                     this.logActivity(`Scan klaar: ${rows.length} steden, ${alerts.length} kansen`, alerts.length ? 'success' : 'info');
@@ -15153,10 +15153,9 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                 }
                 alarm.style.borderColor = '#f9a825';
                 list.innerHTML = rows.map(row => {
-                    const parts = RESOURCES.filter(r => row.sellable[r.key] > 0).map(r => {
-                        const offer = row.offers && row.offers[r.key];
-                        const goldText = offer ? `→≈${offer.gold.toLocaleString('nl-NL')}g` : '';
-                        return `<span class="resources_small ${r.key}" style="display:inline-block;width:12px;height:12px;vertical-align:-2px;" title="${r.label}"></span> ~${row.sellable[r.key].toLocaleString('nl-NL')}${goldText}`;
+                    const parts = RESOURCES.filter(r => row.offers && row.offers[r.key]).map(r => {
+                        const offer = row.offers[r.key];
+                        return `<span class="resources_small ${r.key}" style="display:inline-block;width:12px;height:12px;vertical-align:-2px;" title="${r.label}"></span> ~${offer.amount.toLocaleString('nl-NL')}→≈${offer.gold.toLocaleString('nl-NL')}g`;
                     });
                     const total = this.rowTotalGold(row);
                     const tip = `Totaal ≈${total.toLocaleString('nl-NL')} goud · Cap. ${row.capacity.toLocaleString('nl-NL')}`;
