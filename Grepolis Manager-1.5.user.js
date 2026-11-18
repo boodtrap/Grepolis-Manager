@@ -15133,7 +15133,45 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     const main = window.GrepoMain;
                     if (main && typeof main.openGmbPanel === 'function') main.openGmbPanel();
                 });
+                const list = alarm.querySelector('#gmb-gold-alarm-list');
+                if (list) list.addEventListener('click', e => {
+                    const el = e.target.closest('[data-gold-town]');
+                    if (!el) return;
+                    e.stopPropagation();
+                    this.goToGoldExchange(Number(el.dataset.goldTown));
+                });
                 document.body.appendChild(alarm);
+            },
+
+            goToGoldExchange: async function(townId) {
+                try {
+                    const uw = GMB_API.getUW();
+                    await GMB_API.get('index', 'switch_town', {}, townId);
+                    await new Promise(resolve => setTimeout(resolve, 1200));
+                    const factory = uw && uw.TownOverviewWindowFactory;
+                    if (factory && typeof factory.openTradeOverview === 'function') {
+                        factory.openTradeOverview();
+                        await new Promise(resolve => setTimeout(resolve, 800));
+                        this.openGoldTab();
+                    }
+                } catch (e) {
+                    GMB.log('GoldAlert', `Stad wisselen mislukt: ${e.message}`, 'warn');
+                }
+            },
+
+            openGoldTab: function() {
+                try {
+                    const wnd = document.querySelector('div[id^="gpwnd_"]:not([style*="display: none"])');
+                    if (!wnd) return;
+                    const candidates = wnd.querySelectorAll('a, li, span, div');
+                    for (const el of candidates) {
+                        const text = (el.textContent || '').trim().toLowerCase();
+                        if ((text === 'goud' || text === 'gold' || text.includes('goudbeurs') || text.includes('gold exchange')) && el.children.length <= 2) {
+                            el.click();
+                            return;
+                        }
+                    }
+                } catch (e) {}
             },
 
             updateGoldAlarm: function() {
@@ -15159,7 +15197,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     });
                     const total = this.rowTotalGold(row);
                     const tip = `Totaal ≈${total.toLocaleString('nl-NL')} goud · Cap. ${row.capacity.toLocaleString('nl-NL')}`;
-                    return `<div title="${esc(tip)}" style="padding:3px 6px;border-bottom:1px solid rgba(255,255,255,0.06);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><b style="color:#ffd54f;">${esc(row.town.name)}</b> <span style="color:#cfd8dc;">${parts.join(' · ')}</span>${total > 0 ? ` <b style="color:#ffd54f;">≈${total.toLocaleString('nl-NL')}g</b>` : ''}</div>`;
+                    return `<div title="${esc(tip)}" style="padding:3px 6px;border-bottom:1px solid rgba(255,255,255,0.06);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><b data-gold-town="${row.town.id}" style="color:#ffd54f;cursor:pointer;text-decoration:underline dotted;">${esc(row.town.name)}</b> <span style="color:#cfd8dc;">${parts.join(' · ')}</span>${total > 0 ? ` <b style="color:#ffd54f;">≈${total.toLocaleString('nl-NL')}g</b>` : ''}</div>`;
                 }).join('');
             },
 
