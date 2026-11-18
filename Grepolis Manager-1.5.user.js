@@ -14747,6 +14747,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
             timer: null,
             scanning: false,
             lastAlertSignature: '',
+            lastAlertRows: [],
             DEFAULT_INTERVAL_SECONDS: 60,
 
             init: function() {
@@ -15079,6 +15080,9 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     }
                     this.lastAlertSignature = signature;
                     this.alertTownNames = [...new Set(alerts.map(a => String(a).split(':')[0].trim()).filter(Boolean))];
+                    this.lastAlertRows = rows
+                        .filter(row => RESOURCES.some(r => row.sellable[r.key] > 0))
+                        .sort((a, b) => this.rowTotalGold(b) - this.rowTotalGold(a));
                     this.updateGoldAlarm();
                     this.logActivity(`Scan klaar: ${rows.length} steden, ${alerts.length} kansen`, alerts.length ? 'success' : 'info');
                 } catch (error) {
@@ -15113,13 +15117,17 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     </tr>`).join('')}</tbody></table>`;
             },
 
-            // ---------- Banner ----------
+            rowTotalGold: function(row) {
+                return RESOURCES.reduce((sum, r) => sum + (row.offers && row.offers[r.key] ? row.offers[r.key].gold : 0), 0);
+            },
+
+            // ---------- Paneel linksonder ----------
             initGoldAlarm: function() {
                 if (document.getElementById('gmb-gold-alarm')) return;
                 const alarm = document.createElement('div');
                 alarm.id = 'gmb-gold-alarm';
-                alarm.style.cssText = 'position:fixed;top:4px;left:648px;z-index:99996;display:none;padding:7px 11px;background:rgba(22,24,36,0.94);border:1px solid #f9a825;border-radius:5px;color:#fff;font-size:11px;cursor:pointer;';
-                alarm.textContent = '💰 Goud';
+                alarm.style.cssText = 'position:fixed;left:8px;bottom:8px;top:auto;right:auto;z-index:99996;display:none;width:310px;max-height:190px;background:rgba(22,24,36,0.95);border:1px solid #f9a825;border-radius:6px;color:#fff;font-size:11px;cursor:pointer;overflow:hidden;';
+                alarm.innerHTML = '<div style="padding:6px 10px;font-weight:700;color:#ffd54f;border-bottom:1px solid #f9a825;">💰 Gold Alert</div><div id="gmb-gold-alarm-list" style="max-height:105px;overflow-y:auto;padding:2px 4px;"></div>';
                 alarm.title = 'Klik om paneel te openen';
                 alarm.addEventListener('click', () => {
                     const main = window.GrepoMain;
@@ -15134,19 +15142,26 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                 const enabled = GMB.storage.get('goldalert_enabled', false) && GMB.isModuleEnabled('GoldAlert');
                 alarm.style.display = enabled ? 'block' : 'none';
                 if (!enabled) return;
-                const names = this.alertTownNames || [];
-                if (names.length) {
-                    const shown = names.slice(0, 3).join(', ');
-                    alarm.textContent = `💰 Goud: ${shown}${names.length > 3 ? ` +${names.length - 3}` : ''}`;
-                    alarm.title = `Goud te koop in: ${names.join(', ')}`;
-                    alarm.style.borderColor = '#f9a825';
-                    alarm.style.color = '#ffd54f';
-                } else {
-                    alarm.textContent = '💰 Goud: —';
-                    alarm.title = 'Geen verkoopkansen gevonden';
+                const list = alarm.querySelector('#gmb-gold-alarm-list');
+                if (!list) return;
+                const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+                const rows = this.lastAlertRows || [];
+                if (!rows.length) {
+                    list.innerHTML = '<div style="padding:5px 8px;color:#9e9e9e;">Geen verkoopkansen gevonden</div>';
                     alarm.style.borderColor = '#444';
-                    alarm.style.color = '#fff';
+                    return;
                 }
+                alarm.style.borderColor = '#f9a825';
+                list.innerHTML = rows.map(row => {
+                    const parts = RESOURCES.filter(r => row.sellable[r.key] > 0).map(r => {
+                        const offer = row.offers && row.offers[r.key];
+                        const goldText = offer ? ` → ≈${offer.gold.toLocaleString('nl-NL')}g` : '';
+                        return `${r.icon} ${r.label} ~${row.sellable[r.key].toLocaleString('nl-NL')}${goldText}`;
+                    });
+                    const total = this.rowTotalGold(row);
+                    const tip = `Totaal ≈${total.toLocaleString('nl-NL')} goud · Cap. ${row.capacity.toLocaleString('nl-NL')}`;
+                    return `<div title="${esc(tip)}" style="padding:3px 6px;border-bottom:1px solid rgba(255,255,255,0.06);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><b style="color:#ffd54f;">${esc(row.town.name)}</b> <span style="color:#cfd8dc;">${parts.join(' · ')}</span>${total > 0 ? ` <b style="color:#ffd54f;">≈${total.toLocaleString('nl-NL')}g</b>` : ''}</div>`;
+                }).join('');
             },
 
             logActivity: function(message, type = 'info') {
