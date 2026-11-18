@@ -15155,8 +15155,8 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                 list.innerHTML = rows.map(row => {
                     const parts = RESOURCES.filter(r => row.sellable[r.key] > 0).map(r => {
                         const offer = row.offers && row.offers[r.key];
-                        const goldText = offer ? ` → ≈${offer.gold.toLocaleString('nl-NL')}g` : '';
-                        return `${r.icon} ${r.label} ~${row.sellable[r.key].toLocaleString('nl-NL')}${goldText}`;
+                        const goldText = offer ? `→≈${offer.gold.toLocaleString('nl-NL')}g` : '';
+                        return `<span class="resources_small ${r.key}" style="display:inline-block;width:12px;height:12px;vertical-align:-2px;" title="${r.label}"></span> ~${row.sellable[r.key].toLocaleString('nl-NL')}${goldText}`;
                     });
                     const total = this.rowTotalGold(row);
                     const tip = `Totaal ≈${total.toLocaleString('nl-NL')} goud · Cap. ${row.capacity.toLocaleString('nl-NL')}`;
