@@ -14618,7 +14618,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     if (main && typeof main.openGmbPanel === 'function') main.openGmbPanel();
                 });
                 document.body.appendChild(alarm);
-                this.alarmInterval = setInterval(() => this.updateAlarm(), 30000);
+                this.alarmInterval = setInterval(() => this.updateAlarm(), 1000);
             },
 
             setAlarmEnabled: function(enabled) { this.updateAlarm(); },
@@ -14711,7 +14711,6 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
         console.log('[FarmAlert] Module loaded');
     });
 })();
-
 // ============================================================
 // GOLD ALERT MODULE (read-only grondstof-monitor)
 // ============================================================
