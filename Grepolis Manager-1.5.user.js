@@ -470,7 +470,6 @@
 
         async initializeManagers() {
             this.modules.wereldinfo = new WereldInfo(this);
-            BigTransporterCapacity.activate();
 
             // <<< GrepoData optioneel: vraag token maar blokkeer init niet
             try {
@@ -637,7 +636,6 @@
                         <li><strong>⚙️ Instellingen</strong> – Pas je voorkeuren en Supabase-configuratie aan. Hier kun je ook API-keys of scriptopties beheren.</li>
                         <li><strong>🌍 Wereldinfo</strong> – Geeft een overzicht van spelers, allianties, steden, veroveringen en ranglijsten uit de officiële Grepolis databestanden.</li>
                         <li><strong>🗺️ Map Overlay</strong> – Voeg extra informatie toe aan de wereldkaart (bijv. sectoren, filters, markeringen).</li>
-                        <li><strong>🚢 Big Transporter Capacity</strong> – Activeert automatisch de capaciteit-boost voor grote transporters in je stadsoverzicht.</li>
                         <li><strong>🛠 GMB Tools</strong> – Alle GMB-functionaliteit (IconTools, Map Enhancer, Trade-venster, Rapporten, Goden, Units, Forum) in een eigen paneel.</li>
                     </ul>
                     <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px;">
@@ -1695,171 +1693,6 @@
         }
     }
 
-    // ======================== //
-    // Transportboot Capaciteit //
-    // ======================== //
-
-    const TransporterCapacity = {
-        interval: null,
-
-        activate() {
-            try {
-                // Voeg CSS toe als nog niet aanwezig
-
-                if (!document.getElementById('transporter_capacity_style')) {
-                    const style = `
-                        #transporter_capacity.cont, #big_transporter.cont {
-                            background: url("https://gpnl.innogamescdn.com/images/game/layout/layout_units_nav_border.png");
-                            height: 25px;
-                            cursor: pointer;
-                            margin-bottom: 3px;
-                            display: flex;
-                            align-items: center;
-                            padding: 0 6px;
-                        }
-                        .trans_ship_icon {
-                            background: #ffcc66;
-                            border-radius: 4px;
-                            padding: 2px;
-                            display: inline-flex;
-                            align-items: center;
-                            margin-right: 3px;
-                            position: relative;
-                        }
-                        #trans_ship, #big_ship {
-                            font-weight: bold;
-                            text-shadow: 1px 1px 2px #000;
-                            color: #FFCC66;
-                            font-size: 10px;
-                            line-height: 2.1;
-                            min-width: 48px;
-                            display: inline-block;
-                            text-align: left;
-                        }
-                        .transporter_checkbox {
-                            margin-left: 50px;
-                            vertical-align: middle;
-                            accent-color: #ffcc66;
-                            width: 14px;
-                            height: 14px;
-                            position: absolute;
-                            left: 50px;
-                            top: 2px;
-                        }
-                        .transporter_row {
-                            display: flex;
-                            align-items: center;
-                            gap: 3px;
-                            height: 22px;
-                        }
-                    `;
-                    $("<style id='transporter_capacity_style'>" + style + "</style>").appendTo('head');
-                }
-
-                // HTML
-                if ($("#transporter_capacity").length === 0) {
-                    $(
-                        '<div id="transporter_capacity" class="cont">' +
-                        '<div class="transporter_row">' +
-                        '<span class="trans_ship_icon" style="position:relative;">' +
-                        '<img id="trans_ship_img" class="ico" src="https://imgur.com/f7mTajn.png" style="width:18px;height:18px;">' +
-                        '<input type="checkbox" id="trans_recruit" class="transporter_checkbox" checked title="Rekruteringsorders meenemen">' +
-                        '</span>' +
-                        '<span id="trans_ship" class="bold text_shadow"></span>' +
-                        '</div>' +
-                        '</div>'
-                    ).appendTo(".units_naval .content");
-                }
-                if ($("#big_transporter").length === 0) {
-                    $(
-                        '<div id="big_transporter" class="cont">' +
-                        '<div class="transporter_row">' +
-                        '<span class="trans_ship_icon">' +
-                        '<img id="big_ship_img" class="ico" src="https://imgur.com/7SHlyeq.png" style="width:18px;height:18px;">' +
-                        '</span>' +
-                        '<span id="big_ship" class="bold text_shadow"></span>' +
-                        '</div>' +
-                        '</div>'
-                    ).appendTo(".units_naval .content");
-                }
-
-                // Start updater
-                if (this.interval) clearInterval(this.interval);
-                this.interval = setInterval(() => this.update(), 1000);
-                this.update();
-
-                // Checkbox event: update beide bij verandering
-                $("#trans_recruit").off("change").on("change", () => this.update());
-            } catch (e) {
-                console.error("TransporterCapacity.activate():", e);
-            }
-        },
-
-        update() {
-            try {
-                const town = ITowns.getTown(Game.townId);
-                if (!town) {
-                    $("#trans_ship").html("-");
-                    $("#big_ship").html("-");
-                    return;
-                }
-                const GD_units = GameData.units;
-                const GD_heroes = GameData.heroes;
-                const researches = typeof town.researches === 'function' ? town.researches() : null;
-                const berth = researches && typeof researches.hasBerth === 'function' && researches.hasBerth()
-                ? GameData.research_bonus.berth
-                : 0;
-                const units = town.units();
-
-                // Snelle transportboten
-                const fast_capacity = (units.transporter || 0) * ((GD_units.transporter?.capacity || 0) + berth);
-                let fast_required = 0;
-
-                // Grote transportboten
-                const big_capacity = (units.big_transporter || 0) * ((GD_units.big_transporter?.capacity || 0) + berth);
-                let big_required = 0;
-
-                const isLand = u => GD_units[u] && !GD_units[u].is_naval && !GD_units[u].flying && GD_units[u].capacity === undefined;
-                const isTransported = u => isLand(u) && ['function_off','function_def','function_both'].includes(GD_units[u].unit_function);
-
-                for (const u in units) {
-                    if (isTransported(u)) {
-                        const pop = u === "spartoi" ? units[u] : units[u] * GD_units[u].population;
-                        fast_required += pop;
-                        big_required += pop;
-                    }
-                }
-
-                // Rekruteringsorders meenemen?
-                if ($("#trans_recruit").is(":checked")) {
-                    for (const order of town.getUnitOrdersCollection().models) {
-                        const u = order.attributes.unit_type;
-                        const amt = order.attributes.units_total;
-                        const building = order.attributes.building_type;
-
-                        if ((building === "barracks" || building === "docks") && GD_units[u] && !(u in GD_heroes) && isTransported(u)) {
-                            const pop = u === "spartoi" ? amt : amt * GD_units[u].population;
-                            fast_required += pop;
-                            big_required += pop;
-                        }
-                    }
-                }
-
-                // Update tekst en kleur
-                $("#trans_ship").html(
-                    `<span style="color:${fast_required > fast_capacity ? "#ffb4b4" : "#6eff5c"}">${fast_required}</span> / <span style="color:#FFCC66">${fast_capacity}</span>`
-                );
-                $("#big_ship").html(
-                    `<span style="color:${big_required > big_capacity ? "#ffb4b4" : "#6eff5c"}">${big_required}</span> / <span style="color:#FFCC66">${big_capacity}</span>`
-                );
-            } catch (e) {
-                console.error("TransporterCapacity.update():", e);
-            }
-        }
-    };
-
-    // Alias voor compatibiliteit met oude scripts
-    window.BigTransporterCapacity = TransporterCapacity;
 
     // Move hasAdminAccess outside the class
     async function hasAdminAccess(main) {
