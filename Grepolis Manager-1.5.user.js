@@ -15200,17 +15200,10 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                         if (ge && obs) obs(ge).subscribe('gmb_goldalert_switch', () => finish(true));
                     } catch (e) {}
                     // Native switch via gpAjax: de response bevat de nieuwe layout
-                    // die gpAjax zelf toepast (ajaxGet careert voor town_switch).
+                    // die gpAjax zelf toepast. Geen 'json'-param nodig.
                     try {
                         if (uw && uw.gpAjax && typeof uw.gpAjax.ajaxGet === 'function') {
-                            const nlreq = (uw.NotificationLoader && (uw.NotificationLoader.nlreq_id || uw.NotificationLoader.nlreqId)) || 0;
-                            uw.gpAjax.ajaxGet('index', 'switch_town', {
-                                town_id: townId,
-                                json: JSON.stringify({ town_id: String(townId), nlreq_id: nlreq })
-                            }, true, function(layout, response) {
-                                const err = response && response.json && response.json.error;
-                                if (!err) finish(true);
-                            });
+                            uw.gpAjax.ajaxGet('index', 'switch_town', { town_id: townId }, true, function() {});
                             return;
                         }
                     } catch (e) {}
