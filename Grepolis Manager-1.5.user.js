@@ -15157,7 +15157,14 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                 if (current === townId) return Promise.resolve(true);
                 return new Promise((resolve) => {
                     let done = false;
-                    const finish = ok => { if (!done) { done = true; cleanup(); resolve(ok); } };
+                    let poll = null;
+                    const finish = ok => {
+                        if (done) return;
+                        done = true;
+                        if (poll) clearInterval(poll);
+                        cleanup();
+                        resolve(ok);
+                    };
                     const cleanup = () => {
                         clearTimeout(timer);
                         try {
@@ -15167,10 +15174,20 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                         } catch (e) {}
                     };
                     const timer = setTimeout(() => finish(false), 8000);
+                    poll = setInterval(() => {
+                        const gid = uw && uw.Game ? parseInt(uw.Game.townId, 10) : null;
+                        if (gid === townId) finish(true);
+                    }, 400);
                     try {
                         const ge = uw && uw.GameEvents && uw.GameEvents.town && uw.GameEvents.town.town_switch;
                         const obs = uw && uw.$ && uw.$.Observer;
                         if (ge && obs) obs(ge).subscribe('gmb_goldalert_switch', () => finish(true));
+                    } catch (e) {}
+                    try {
+                        if (uw && uw.ITowns && typeof uw.ITowns.setCurrentTown === 'function') {
+                            uw.ITowns.setCurrentTown(townId);
+                            return;
+                        }
                     } catch (e) {}
                     const li = document.querySelector(`#fto_town_list li.town${townId}`);
                     if (!li) { finish(false); return; }
@@ -15188,11 +15205,18 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                         return;
                     }
                     await new Promise(resolve => setTimeout(resolve, 600));
-                    const factory = uw && uw.TownOverviewWindowFactory;
-                    if (factory && typeof factory.openTradeOverview === 'function') {
-                        factory.openTradeOverview();
-                        await new Promise(resolve => setTimeout(resolve, 800));
+                    const marketFactory = uw && uw.MarketWindowFactory;
+                    if (marketFactory && typeof marketFactory.openMarketWindow === 'function') {
+                        marketFactory.openMarketWindow();
+                        await new Promise(resolve => setTimeout(resolve, 1200));
                         this.openGoldTab();
+                    } else {
+                        const factory = uw && uw.TownOverviewWindowFactory;
+                        if (factory && typeof factory.openTradeOverview === 'function') {
+                            factory.openTradeOverview();
+                            await new Promise(resolve => setTimeout(resolve, 800));
+                            this.openGoldTab();
+                        }
                     }
                 } catch (e) {
                     GMB.log('GoldAlert', `Stad wisselen mislukt: ${e.message}`, 'warn');
