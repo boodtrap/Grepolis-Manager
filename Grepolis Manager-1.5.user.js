@@ -15204,7 +15204,9 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     try {
                         if (uw && uw.gpAjax && typeof uw.gpAjax.ajaxGet === 'function') {
                             GMB.log('GoldAlert', `Stad-wissel ${townId} via gpAjax...`, 'info');
-                            uw.gpAjax.ajaxGet('index', 'switch_town', { town_id: townId }, true, function() {});
+                            uw.gpAjax.ajaxGet('index', 'switch_town', { town_id: townId }, true, function(a, b) {
+                                GMB.log('GoldAlert', `switch_town response: ${JSON.stringify(a).slice(0, 300)}`, 'info');
+                            });
                             return;
                         }
                         GMB.log('GoldAlert', 'gpAjax.ajaxGet niet beschikbaar', 'warn');
