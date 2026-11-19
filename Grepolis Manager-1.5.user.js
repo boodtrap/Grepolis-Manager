@@ -15143,11 +15143,43 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                 document.body.appendChild(alarm);
             },
 
+            switchToTown: function(townId) {
+                const uw = GMB_API.getUW();
+                const current = uw && uw.Game ? parseInt(uw.Game.townId, 10) : null;
+                if (current === townId) return Promise.resolve(true);
+                return new Promise((resolve) => {
+                    let done = false;
+                    const finish = ok => { if (!done) { done = true; cleanup(); resolve(ok); } };
+                    const cleanup = () => {
+                        clearTimeout(timer);
+                        try {
+                            const ge = uw && uw.GameEvents && uw.GameEvents.town && uw.GameEvents.town.town_switch;
+                            const obs = uw && uw.$ && uw.$.Observer;
+                            if (ge && obs) obs(ge).unsubscribe('gmb_goldalert_switch');
+                        } catch (e) {}
+                    };
+                    const timer = setTimeout(() => finish(false), 8000);
+                    try {
+                        const ge = uw && uw.GameEvents && uw.GameEvents.town && uw.GameEvents.town.town_switch;
+                        const obs = uw && uw.$ && uw.$.Observer;
+                        if (ge && obs) obs(ge).subscribe('gmb_goldalert_switch', () => finish(true));
+                    } catch (e) {}
+                    const li = document.querySelector(`#fto_town_list li.town${townId}`);
+                    if (!li) { finish(false); return; }
+                    const target = li.querySelector('a') || li;
+                    target.click();
+                });
+            },
+
             goToGoldExchange: async function(townId) {
                 try {
                     const uw = GMB_API.getUW();
-                    await GMB_API.get('index', 'switch_town', {}, townId);
-                    await new Promise(resolve => setTimeout(resolve, 1200));
+                    const ok = await this.switchToTown(townId);
+                    if (!ok) {
+                        GMB.log('GoldAlert', `Stad ${townId} niet gevonden in stedentabel of wisselen mislukt.`, 'warn');
+                        return;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 600));
                     const factory = uw && uw.TownOverviewWindowFactory;
                     if (factory && typeof factory.openTradeOverview === 'function') {
                         factory.openTradeOverview();
