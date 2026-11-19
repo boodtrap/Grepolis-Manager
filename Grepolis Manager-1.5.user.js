@@ -13145,7 +13145,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                 .gmb-icontools-mapicon-sprite{position:absolute;left:50%;top:50%;display:block;width:25px;height:25px;margin:0;transform:translate(-50%,-50%) scale(0.6);background-repeat:no-repeat}
                 .town_name_area{position:relative;left:52% !important;z-index:11}
                 #gmb-town-icon{background:url(https://dio-david1327.github.io/img/dio/logo/dio-sprite-5.png) 0 -125px no-repeat;position:absolute;width:69px;height:61px;left:-47px;top:0px;z-index:auto}
-                .town_name_area .btn_prev_town{margin-left:26px !important}
+                .town_name_area .btn_prev_town{position:relative;left:-55px !important}
                 #gmb-town-icon .town_icon_bg{background:url(https://dio-david1327.github.io/img/dio/logo/dio-sprite-5.png) -76px -129px no-repeat;width:43px;height:43px;left:25px;top:4px;cursor:pointer;position:relative}
                 #gmb-town-icon .town_icon_bg:hover{filter:brightness(1.1);box-shadow:0 0 15px rgb(1,197,33)}
                 #gmb-town-icon .icon_big{position:absolute;left:9px;top:9px;height:25px;width:25px;background-repeat:no-repeat}
