@@ -15034,7 +15034,18 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     const minCapacity = Math.max(0, parseInt(GMB.storage.get('goldalert_min_capacity', 1), 10) || 0);
                     const rows = [];
                     const alerts = [];
+                    const doneRows = [];
+                    this.logActivity(`Scan gestart: ${towns.length} steden`, 'info');
+                    let townIndex = 0;
+                    const refreshProgress = () => {
+                        this.lastAlertRows = doneRows
+                            .filter(row => RESOURCES.some(r => row.offers && row.offers[r.key]))
+                            .sort((a, b) => this.rowTotalGold(b) - this.rowTotalGold(a));
+                        this.updateGoldAlarm();
+                        this.renderTable(rows);
+                    };
                     for (const town of towns) {
+                        townIndex++;
                         const resources = this.getTownResources(town.id);
                         const capacity = this.getFreeTradeCapacity(town.id);
                         if (!resources || capacity === null) continue;
@@ -15063,6 +15074,11 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                             } catch (e) { offers[r.key] = null; }
                         }
                         rows.push({ town, resources, capacity, sellable, demand, market, offers });
+                        doneRows.push(rows[rows.length - 1]);
+                        if (townIndex % 3 === 0 || townIndex === towns.length) {
+                            this.logActivity(`Scan bezig: ${townIndex}/${towns.length} steden`, 'info');
+                            refreshProgress();
+                        }
                     }
                     this.renderTable(rows);
                     const signature = alerts.slice().sort().join('|');
@@ -15173,7 +15189,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                             if (ge && obs) obs(ge).unsubscribe('gmb_goldalert_switch');
                         } catch (e) {}
                     };
-                    const timer = setTimeout(() => finish(false), 8000);
+                    const timer = setTimeout(() => finish(false), 10000);
                     poll = setInterval(() => {
                         const gid = uw && uw.Game ? parseInt(uw.Game.townId, 10) : null;
                         if (gid === townId) finish(true);
@@ -15182,6 +15198,21 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                         const ge = uw && uw.GameEvents && uw.GameEvents.town && uw.GameEvents.town.town_switch;
                         const obs = uw && uw.$ && uw.$.Observer;
                         if (ge && obs) obs(ge).subscribe('gmb_goldalert_switch', () => finish(true));
+                    } catch (e) {}
+                    // Native switch via gpAjax: de response bevat de nieuwe layout
+                    // die gpAjax zelf toepast (ajaxGet careert voor town_switch).
+                    try {
+                        if (uw && uw.gpAjax && typeof uw.gpAjax.ajaxGet === 'function') {
+                            const nlreq = (uw.NotificationLoader && (uw.NotificationLoader.nlreq_id || uw.NotificationLoader.nlreqId)) || 0;
+                            uw.gpAjax.ajaxGet('index', 'switch_town', {
+                                town_id: townId,
+                                json: JSON.stringify({ town_id: String(townId), nlreq_id: nlreq })
+                            }, true, function(layout, response) {
+                                const err = response && response.json && response.json.error;
+                                if (!err) finish(true);
+                            });
+                            return;
+                        }
                     } catch (e) {}
                     try {
                         if (uw && uw.ITowns && typeof uw.ITowns.setCurrentTown === 'function') {
@@ -15276,6 +15307,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
             logActivity: function(message, type = 'info') {
                 const logEl = document.getElementById('goldalert-log');
                 if (logEl) {
+                    if (logEl.children.length === 1 && /Wachten op start/.test(logEl.firstElementChild ? logEl.firstElementChild.textContent : '')) logEl.innerHTML = '';
                     const timestamp = new Date().toLocaleTimeString();
                     const div = document.createElement('div');
                     div.className = `gmb-log-entry gmb-log-${type}`;
