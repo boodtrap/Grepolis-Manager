@@ -15203,10 +15203,14 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     // die gpAjax zelf toepast. Geen 'json'-param nodig.
                     try {
                         if (uw && uw.gpAjax && typeof uw.gpAjax.ajaxGet === 'function') {
+                            GMB.log('GoldAlert', `Stad-wissel ${townId} via gpAjax...`, 'info');
                             uw.gpAjax.ajaxGet('index', 'switch_town', { town_id: townId }, true, function() {});
                             return;
                         }
-                    } catch (e) {}
+                        GMB.log('GoldAlert', 'gpAjax.ajaxGet niet beschikbaar', 'warn');
+                    } catch (e) {
+                        GMB.log('GoldAlert', `gpAjax switch fout: ${e.message}`, 'warn');
+                    }
                     try {
                         if (uw && uw.ITowns && typeof uw.ITowns.setCurrentTown === 'function') {
                             uw.ITowns.setCurrentTown(townId);
