@@ -13145,7 +13145,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                 .gmb-icontools-mapicon-sprite{position:absolute;left:50%;top:50%;display:block;width:25px;height:25px;margin:0;transform:translate(-50%,-50%) scale(0.6);background-repeat:no-repeat}
                 .town_name_area{position:relative;left:52% !important;z-index:11}
                 #gmb-town-icon{background:url(https://dio-david1327.github.io/img/dio/logo/dio-sprite-5.png) 0 -125px no-repeat;position:absolute;width:69px;height:61px;left:-47px;top:0px;z-index:auto}
-                .town_name_area .btn_prev_town{position:relative;left:-55px !important}
+                .town_name_area .btn_prev_town{position:relative;left:-130px !important;z-index:11}
                 #gmb-town-icon .town_icon_bg{background:url(https://dio-david1327.github.io/img/dio/logo/dio-sprite-5.png) -76px -129px no-repeat;width:43px;height:43px;left:25px;top:4px;cursor:pointer;position:relative}
                 #gmb-town-icon .town_icon_bg:hover{filter:brightness(1.1);box-shadow:0 0 15px rgb(1,197,33)}
                 #gmb-town-icon .icon_big{position:absolute;left:9px;top:9px;height:25px;width:25px;background-repeat:no-repeat}
@@ -14746,6 +14746,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
         const GMB_GoldAlert = {
             enabled: false,
             timer: null,
+            countdownTimer: null,
             scanning: false,
             lastAlertSignature: '',
             lastAlertRows: [],
@@ -14758,6 +14759,7 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                     this.addUITab();
                     this.initGoldAlarm();
                     this.updateGoldAlarm();
+                    if (!this.countdownTimer) this.countdownTimer = setInterval(() => this.updateCountdown(), 1000);
                     if (this.enabled) this.start();
                 }, 600);
             },
@@ -15036,13 +15038,18 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
                         const resources = this.getTownResources(town.id);
                         const capacity = this.getFreeTradeCapacity(town.id);
                         if (!resources || capacity === null) continue;
+                        const thresholds = {};
+                        const candidate = RESOURCES.some(r => {
+                            thresholds[r.key] = Math.max(0, parseInt(GMB.storage.get(`goldalert_threshold_${r.key}`, 10000), 10) || 0);
+                            return resources[r.key] >= thresholds[r.key] && capacity >= minCapacity;
+                        });
                         let market = null;
-                        try { market = await this.getMarketData(town.id); } catch (e) { market = null; }
+                        if (candidate) { try { market = await this.getMarketData(town.id); } catch (e) { market = null; } }
                         const sellable = {};
                         const demand = {};
                         const offers = {};
                         RESOURCES.forEach(r => {
-                            const threshold = Math.max(0, parseInt(GMB.storage.get(`goldalert_threshold_${r.key}`, 10000), 10) || 0);
+                            const threshold = thresholds[r.key] !== undefined ? thresholds[r.key] : Math.max(0, parseInt(GMB.storage.get(`goldalert_threshold_${r.key}`, 10000), 10) || 0);
                             const marketDemand = market && market[r.key] ? market[r.key].demand : resources[r.key];
                             demand[r.key] = marketDemand;
                             const amount = Math.min(resources[r.key], marketDemand, capacity);
@@ -15194,13 +15201,21 @@ Werk de melding bij na elke relevante wijziging en meld wanneer de stad veilig i
 
             openGoldTab: function() {
                 try {
-                    const wnd = document.querySelector('div[id^="gpwnd_"]:not([style*="display: none"])');
-                    if (!wnd) return;
-                    const candidates = wnd.querySelectorAll('a, li, span, div');
-                    for (const el of candidates) {
-                        const text = (el.textContent || '').trim().toLowerCase();
-                        if ((text === 'goud' || text === 'gold' || text.includes('goudbeurs') || text.includes('gold exchange')) && el.children.length <= 2) {
-                            el.click();
+                    const container = document.querySelector('#premium_exchange .gp_captions_container, .gp_captions_container');
+                    if (!container) return;
+                    const captions = container.querySelectorAll('.gp_page_caption');
+                    for (const cap of captions) {
+                        const text = (cap.textContent || '').trim().toLowerCase();
+                        if (text.includes('goud') || text.includes('gold') || text.includes('verkoop')) {
+                            const clickable = cap.querySelector('a, .gp_caption, [class*="caption"]') || cap;
+                            clickable.click();
+                            return;
+                        }
+                    }
+                    for (const cap of captions) {
+                        const text = (cap.textContent || '').trim().toLowerCase();
+                        if ((text === 'goud' || text === 'gold' || text.includes('goudbeurs') || text.includes('gold exchange')) && cap.children.length <= 2) {
+                            cap.click();
                             return;
                         }
                     }
